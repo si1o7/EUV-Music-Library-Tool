@@ -4,29 +4,47 @@ Add MP3 songs to the Europa Universalis V Music Player and the war and peace pla
 
 ## Quick start
 
-1. **Open the tool.** On GitHub, select **Code > Download ZIP**. In Downloads, right-click the ZIP, select **Extract All**, then **Extract**. Open the extracted folder and double-click **EUV Music Library Tool.cmd**.
-2. **Add songs.** Select **Add MP3 Files**, select MP3 songs, then select **Open**. Hold **Ctrl** to select several songs. The tool copies the files into the music library and lists the titles automatically.
-3. **Choose playback.** Leave **Both** for music during war and peace. For a different assignment, select **War** or **Peace** in the **Playback** column. Title and artist fields also support editing.
-4. **Install the music.** Select **Install Music**. If an FFmpeg setup prompt appears, select **Yes** and follow the installer prompts. After installation finishes, close and reopen the tool, then select **Install Music** again. Wait for **Library update complete**.
-5. **Enable the mod.** Open EU5 through Steam. In **Mods**, enable **EUV Music Library**, then restart EU5. Open the Music Player and look for an imported title.
+### Songs already in the music folder
 
-Steam supplies the game location, including libraries on additional drives. Windows supplies the Documents location, including OneDrive redirection. Game-folder selection is automatic.
+1. Return to **EUV Music Library Tool** and select **Refresh**. MP3s copied through **Open Music Folder** should appear in the song list, including MP3s inside album folders.
+2. Review the **Title**, **Artist**, and **Playback** columns. Correct any missing tags directly in the list. Leave **Both** for war and peace, or choose **War** or **Peace** for a single playlist.
+3. Select **Convert and Implement** in the older interface or **Install Music** in the current interface. Both buttons build the local EU5 music mod. Keep the tool open until the success message appears. For an FFmpeg prompt, follow the setup instructions below.
+4. Open **Europa Universalis V** through Steam. In **Mods**, enable **EUV Music Library**, then restart the game. Open the in-game **Music Player** and look for a title from the song list. Select the title to check playback directly; hearing a song through a war or peace playlist can take longer.
 
-## Updating the library
+### Starting with an empty library
 
-- **Add songs** with **Add MP3 Files**. Repeated imports of identical MP3 files under the same name skip the extra copy. Different recordings with matching filenames receive numbered copies.
-- **Remove songs** with **Remove Song**. Removal sends the selected library copies to the Recycle Bin.
-- Select **Install Music** after additions, edits, removals, or a major game update. Installing an empty library clears previously generated music.
-- For album folders, select **Open Music Folder**, copy the album folders into the open window, then select **Refresh** in the tool.
+1. On GitHub, select **Code > Download ZIP**. In Downloads, right-click the ZIP, select **Extract All**, then **Extract**. Open the extracted folder and double-click **EUV Music Library Tool.cmd**.
+2. Select **Add MP3 Files**, choose the songs, and select **Open**. The tool copies the MP3s into the library and fills in the song list. For a full album folder, select **Open Music Folder**, copy the album folder into the open window, then select **Refresh**.
+3. Review the list and continue from step 2 under **Songs already in the music folder**. Steam supplies the installed game location, including libraries on additional drives.
+
+### First conversion and FFmpeg
+
+FFmpeg converts MP3 audio into a format the game can use. In the current tool, select **Yes** at the FFmpeg setup prompt and let installation finish. Close and reopen **EUV Music Library Tool.cmd**, then select **Install Music** again.
+
+If the older tool displays a command instead, open **Windows Terminal** from Start and run:
+
+```powershell
+winget install --id Gyan.FFmpeg --exact
+```
+
+After installation finishes, reopen the tool, select **Refresh**, then **Convert and Implement**.
+
+## Updating the library or the tool
+
+- **Add or edit songs.** Import more MP3s or copy files through **Open Music Folder** and select **Refresh**. After changing titles, artists, or playback settings, run the install or conversion button again to update the mod.
+- **Remove songs.** Select the library entries and choose **Remove Song**. The selected library copies move to the Recycle Bin. Run **Install Music** in the current tool to update the mod, including after removing the final song.
+- **Upgrade from the older interface.** Close the older tool, extract the current ZIP into a new folder, and launch the new copy. Both interfaces use the same music library under Documents. With the same EU5 user-data location, existing MP3s and saved assignments carry over. Select **Refresh** to check the list.
+- **After a major EU5 update**, run **Install Music** again to rebuild the music banks for the installed game version.
 
 ## Troubleshooting
 
-| Message or symptom | Next step |
+| Symptom | Next step |
 | --- | --- |
-| EU5 music files could not be found | Open **Steam > Library > Europa Universalis V**. Finish installation or pending updates. For an installed game, open **Properties > Installed Files > Verify integrity of game files**. Retry **Install Music**. |
-| FFmpeg setup unavailable | Install **App Installer** from Microsoft Store, reopen the tool, then select **Install Music**. |
+| The list is empty after copying songs | Select **Open Music Folder** from the running tool. Check for files ending in `.mp3` in that folder or an album subfolder, then select **Refresh**. The extracted GitHub folder holds the launcher and scripts. |
+| FFmpeg setup is unavailable | Install **App Installer** from Microsoft Store, reopen the tool, and retry FFmpeg setup. |
+| EU5 music files could not be found | Open **Steam > Library > Europa Universalis V**. Finish installation or pending updates. For an installed game, open **Properties > Installed Files > Verify integrity of game files**, then retry conversion. |
 | Unknown sound-bank version | The pinned converter supports bank versions 150 and 172. Check for a converter update after a game patch. |
-| Imported titles missing | Enable **EUV Music Library** in **Mods**, disable competing music mods replacing the same sound bank, and restart EU5. |
+| A title is missing from the Music Player | Check the title in the tool's song list and confirm conversion completed. Enable **EUV Music Library** in **Mods**, disable competing music mods replacing the same bank, then restart EU5. |
 
 ## Technical details
 
