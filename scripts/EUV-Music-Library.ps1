@@ -392,10 +392,43 @@ function Install-LocalMod {
     Write-Success "Local mod installed at $($script:ModDir)"
 }
 
+function Get-SteamRoots {
+    foreach ($key in @('HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam')) {
+        $property = if ($key.StartsWith('HKCU')) { 'SteamPath' } else { 'InstallPath' }
+        try { Get-ItemPropertyValue -Path $key -Name $property -ErrorAction Stop } catch { continue }
+    }
+    Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Steam'
+}
+
+function Find-GameBank([string[]]$SteamRoots) {
+    $libraries = foreach ($root in $SteamRoots) {
+        if (-not $root) { continue }
+        $root
+        $vdf = Join-Path $root 'steamapps\libraryfolders.vdf'
+        if (Test-Path -LiteralPath $vdf -PathType Leaf) {
+            foreach ($line in [IO.File]::ReadLines($vdf)) {
+                if ($line -match '^\s*"path"\s+"([^"]+)"') { $Matches[1].Replace('\\', '\') }
+            }
+        }
+    }
+    foreach ($library in ($libraries | Select-Object -Unique)) {
+        $apps = Join-Path $library 'steamapps'
+        $folder = 'Europa Universalis V'
+        $manifest = Join-Path $apps 'appmanifest_3450310.acf'
+        if (Test-Path -LiteralPath $manifest -PathType Leaf) {
+            $acf = [IO.File]::ReadAllText($manifest)
+            if ($acf -match '(?m)^\s*"installdir"\s+"([^"\\/:]+)"') { $folder = $Matches[1] }
+        }
+        $bank = Join-Path $apps "common\$folder\game\loading_screen\sound\banks\windows\sb_music_logic.bnk"
+        if (Test-Path -LiteralPath $bank -PathType Leaf) { return $bank }
+    }
+    throw 'EU5 music files could not be found. Open Steam > Library > Europa Universalis V. Select Install or finish pending updates. For an installed game, open Properties > Installed Files > Verify integrity of game files. Retry Install Music.'
+}
+
 function Assert-Ffmpeg {
     $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
     if (-not $ffmpeg) {
-        throw "FFmpeg was not found. Install it in Windows Terminal with:`nwinget install --id Gyan.FFmpeg`nThen restart this tool."
+        throw 'FFmpeg is required. Run winget install --id Gyan.FFmpeg --exact, then reopen EUV Music Library Tool.'
     }
 }
 
@@ -403,7 +436,7 @@ function Get-VerifiedUpstreamScript {
     Ensure-Directory $script:CacheDir
     $validCache = (Test-Path -LiteralPath $script:UpstreamPath -PathType Leaf) -and ((Get-FileSha256 $script:UpstreamPath) -eq $script:UpstreamSha256)
     if (-not $validCache) {
-        Write-Host 'Downloading the pinned EU5 Wwise converter from its original repository...'
+        Write-Host 'Downloading the pinned EU5 Wwise converter...'
         $temporaryPath = "$($script:UpstreamPath).download"
         Invoke-WebRequest -Uri $script:UpstreamUrl -OutFile $temporaryPath -UseBasicParsing
         $actualHash = Get-FileSha256 $temporaryPath
@@ -420,7 +453,7 @@ function ConvertTo-PowerShellLiteral([string]$Value) {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
-function New-PatchedConverter([object[]]$Tracks) {
+function New-PatchedConverter([object[]]$Tracks, [string]$GameBank) {
     $source = Get-VerifiedUpstreamScript
 
     $modBlockPattern = '(?s)# Auto-detect eu4_soundtrack Workshop mod via Steam registry \+ libraryfolders\.vdf.*?(?=\$BanksDir\s+=)'
@@ -488,7 +521,8 @@ function Find-Ogg([string]$SourceOgg, [string]$DlcDir, [string]$Eu4Path) {
     $patched = $patched.Replace($playerSegmentOriginal, $playerSegmentIntegrated)
 
     $patched = $patched.Replace('EU4 Soundtrack for EU5', 'EUV Music Library')
-    $patched = $patched.Replace('Locating EU4...', 'Locating your music library...')
+    $patched = $patched.Replace('$eu5Bank = Find-EU5MusicBank', '$eu5Bank = ' + (ConvertTo-PowerShellLiteral $GameBank))
+    $patched = $patched.Replace('Locating EU4...', 'Locating the music library...')
     $patched = $patched.Replace('EU4 not found. Make sure Europa Universalis IV is installed on this Steam account.', 'The local music library folder was not found.')
     $patched = $patched.Replace('EU4: $eu4Path', 'Music library: $eu4Path')
     $patched = $patched.Replace('Not found in EU4 folder', 'Not found in music library')
@@ -964,7 +998,7 @@ function Invoke-GeneratedConverter([string]$ConverterPath) {
         $env:EUV_MUSIC_MOD_DIR = $script:ModDir
         $env:EUV_MUSIC_SOURCE_DIR = $script:TracksDir
         $converterOutput = @()
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $ConverterPath 2>&1 |
+        & powershell.exe -NonInteractive -NoLogo -NoProfile -ExecutionPolicy Bypass -File $ConverterPath 2>&1 |
             Tee-Object -Variable converterOutput | ForEach-Object { Write-Host $_ }
         $converterExitCode = $LASTEXITCODE
         if ($converterExitCode -ne 0) {
@@ -982,18 +1016,18 @@ function Invoke-GeneratedConverter([string]$ConverterPath) {
 function Sync-Library {
     Write-Heading 'Syncing EUV Music Library'
     Install-LocalMod
-    Assert-Ffmpeg
     $manifest = Update-ManifestFromFiles
     $tracks = @(Get-ActiveTracks $manifest)
     if ($tracks.Count -eq 0) {
         Clear-GeneratedMod
-        Start-Process explorer.exe -ArgumentList ('"{0}"' -f $script:TracksDir)
         Write-Notice "No enabled audio files were found. The generated soundtrack is empty. Add MP3 files to:`n$($script:TracksDir)"
         return $false
     }
 
     Write-Host "Preparing $($tracks.Count) track(s)..."
-    $converter = New-PatchedConverter $tracks
+    $gameBank = Find-GameBank @(Get-SteamRoots)
+    Assert-Ffmpeg
+    $converter = New-PatchedConverter $tracks $gameBank
     try {
         Start-OutputTransaction $tracks
         Invoke-GeneratedConverter $converter
@@ -1034,6 +1068,23 @@ function Sync-Library {
     return $true
 }
 
+function Import-LibraryMp3([string]$Path) {
+    if ([IO.Path]::GetExtension($Path) -ne '.mp3') { throw 'Select an MP3 audio file.' }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $tracks = [IO.Path]::GetFullPath($script:TracksDir).TrimEnd('\') + '\'
+    if ($fullPath.StartsWith($tracks, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $name = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $destination = Join-Path $tracks ([IO.Path]::GetFileName($Path))
+    $suffix = 2
+    while ([IO.File]::Exists($destination)) {
+        if ((Get-FileSha256 $Path) -eq (Get-FileSha256 $destination)) { return $false }
+        $destination = Join-Path $tracks "$name ($suffix).mp3"
+        $suffix++
+    }
+    [IO.File]::Copy($Path, $destination, $false)
+    return $true
+}
+
 function Open-LibraryFolder {
     Install-LocalMod
     Start-Process explorer.exe -ArgumentList ('"{0}"' -f $script:TracksDir)
@@ -1053,27 +1104,33 @@ function Show-MusicLibraryWindow {
     $form.MinimumSize = New-Object Drawing.Size(760, 480)
 
     $intro = New-Object Windows.Forms.Label
-    $intro.Text = 'Add MP3 files, review their title and artist, choose when they play, then convert and implement.'
+    $intro.Text = 'Add MP3 files, review the song list, then select Install Music. New songs play during war and peace.'
     $intro.AutoSize = $true
     $intro.Location = New-Object Drawing.Point(16, 16)
     $form.Controls.Add($intro)
 
+    $addButton = New-Object Windows.Forms.Button
+    $addButton.Text = 'Add MP3 Files'
+    $addButton.Size = New-Object Drawing.Size(120, 32)
+    $addButton.Location = New-Object Drawing.Point(16, 46)
+    $form.Controls.Add($addButton)
+
     $openButton = New-Object Windows.Forms.Button
     $openButton.Text = 'Open Music Folder'
     $openButton.Size = New-Object Drawing.Size(145, 32)
-    $openButton.Location = New-Object Drawing.Point(16, 46)
+    $openButton.Location = New-Object Drawing.Point(145, 46)
     $form.Controls.Add($openButton)
 
     $refreshButton = New-Object Windows.Forms.Button
     $refreshButton.Text = 'Refresh'
     $refreshButton.Size = New-Object Drawing.Size(90, 32)
-    $refreshButton.Location = New-Object Drawing.Point(170, 46)
+    $refreshButton.Location = New-Object Drawing.Point(299, 46)
     $form.Controls.Add($refreshButton)
 
     $removeButton = New-Object Windows.Forms.Button
     $removeButton.Text = 'Remove Song'
     $removeButton.Size = New-Object Drawing.Size(110, 32)
-    $removeButton.Location = New-Object Drawing.Point(269, 46)
+    $removeButton.Location = New-Object Drawing.Point(398, 46)
     $form.Controls.Add($removeButton)
 
     $grid = New-Object Windows.Forms.DataGridView
@@ -1136,7 +1193,7 @@ function Show-MusicLibraryWindow {
     $form.Controls.Add($progress)
 
     $implementButton = New-Object Windows.Forms.Button
-    $implementButton.Text = 'Convert and Implement'
+    $implementButton.Text = 'Install Music'
     $implementButton.Size = New-Object Drawing.Size(180, 38)
     $implementButton.Location = New-Object Drawing.Point(744, 512)
     $implementButton.Anchor = 'Bottom,Right'
@@ -1158,7 +1215,7 @@ function Show-MusicLibraryWindow {
             $row.Cells['File'].Value = [string]$track.file
         }
         $statusLabel.Text = "$($grid.Rows.Count) MP3 file(s) detected."
-        if ($null -eq $form.Tag) { $implementButton.Enabled = $grid.Rows.Count -gt 0 }
+        if ($null -eq $form.Tag) { $implementButton.Enabled = $grid.Rows.Count -gt 0 -or (Test-Path -LiteralPath $script:StatePath) }
     }
 
     $saveGrid = {
@@ -1182,6 +1239,26 @@ function Show-MusicLibraryWindow {
         Save-Manifest $manifest
     }
 
+    $addButton.Add_Click({
+        $picker = New-Object Windows.Forms.OpenFileDialog
+        try {
+            $picker.Title = 'Select MP3 files'
+            $picker.Filter = 'MP3 audio (*.mp3)|*.mp3'
+            $picker.Multiselect = $true
+            if ($picker.ShowDialog($form) -ne 'OK') { return }
+            & $saveGrid
+            $added = 0
+            foreach ($path in $picker.FileNames) {
+                if (Import-LibraryMp3 $path) { $added++ }
+            }
+            & $loadGrid
+            $statusLabel.Text = "Added $added MP3 file(s). Select Install Music to update EU5."
+        } catch {
+            $message = $_.Exception.Message
+            & $loadGrid
+            [Windows.Forms.MessageBox]::Show($message, $script:ToolName, 'OK', 'Error') | Out-Null
+        } finally { $picker.Dispose() }
+    })
     $openButton.Add_Click({ Open-LibraryFolder })
     $refreshButton.Add_Click({
         try { & $saveGrid; & $loadGrid } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null }
@@ -1192,7 +1269,7 @@ function Show-MusicLibraryWindow {
             return
         }
         $answer = [Windows.Forms.MessageBox]::Show(
-            'Remove the selected managed MP3 files? They will be sent to the Recycle Bin. Your originals elsewhere are not affected.',
+            'Move the selected library copies to the Recycle Bin?',
             $script:ToolName, 'YesNo', 'Warning')
         if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
         try {
@@ -1215,7 +1292,16 @@ function Show-MusicLibraryWindow {
     $implementButton.Add_Click({
         try {
             & $saveGrid
+            if ($grid.Rows.Count -gt 0 -and -not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
+                $installer = Get-Command winget.exe -ErrorAction SilentlyContinue
+                if (-not $installer) { throw 'Install App Installer from Microsoft Store, then reopen EUV Music Library Tool for FFmpeg setup.' }
+                $answer = [Windows.Forms.MessageBox]::Show('FFmpeg converts MP3 audio for EU5. Start the FFmpeg installer? After installation, close and reopen EUV Music Library Tool, then select Install Music.', $script:ToolName, 'YesNo', 'Question')
+                if ($answer -eq 'Yes') { Start-Process -FilePath $installer.Source -ArgumentList 'install --id Gyan.FFmpeg --exact --source winget' }
+                return
+            }
             $form.UseWaitCursor = $true
+            $grid.Enabled = $false
+            $addButton.Enabled = $false
             $implementButton.Enabled = $false
             $openButton.Enabled = $false
             $refreshButton.Enabled = $false
@@ -1232,9 +1318,11 @@ function Show-MusicLibraryWindow {
             } -ArgumentList $PSCommandPath, $script:Eu5UserDir
             $pollTimer.Start()
         } catch {
-            $statusLabel.Text = 'Implementation failed; the previous working mod was restored.'
+            $statusLabel.Text = 'Music installation stopped.'
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null
             $progress.Style = 'Blocks'
+            $grid.Enabled = $true
+            $addButton.Enabled = $true
             $implementButton.Enabled = $true
             $openButton.Enabled = $true
             $refreshButton.Enabled = $true
@@ -1252,6 +1340,8 @@ function Show-MusicLibraryWindow {
         $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
         Remove-Job -Job $job -Force
         $form.Tag = $null
+        $grid.Enabled = $true
+        $addButton.Enabled = $true
         $progress.Style = 'Blocks'
         $implementButton.Enabled = $true
         $openButton.Enabled = $true
@@ -1261,9 +1351,9 @@ function Show-MusicLibraryWindow {
 
         if ($jobState -eq 'Completed') {
             & $loadGrid
-            $statusLabel.Text = 'Implementation complete. Launch EU5 normally through Steam.'
+            $statusLabel.Text = 'Music library updated.'
             [Windows.Forms.MessageBox]::Show(
-                'Music was implemented successfully. Enable EUV Music Library in EU5 once, then launch the game normally through Steam.',
+                'Library update complete. Open Europa Universalis V through Steam. In Mods, enable EUV Music Library and restart the game.',
                 $script:ToolName, 'OK', 'Information') | Out-Null
         } else {
             $message = if ($null -ne $reason -and -not [string]::IsNullOrWhiteSpace($reason.Message)) {
@@ -1273,7 +1363,7 @@ function Show-MusicLibraryWindow {
             }
             if ([string]::IsNullOrWhiteSpace($message)) { $message = 'Conversion failed. See the console output for details.' }
             if ($message.Length -gt 3000) { $message = $message.Substring($message.Length - 3000) }
-            $statusLabel.Text = 'Implementation failed; the previous working mod was restored.'
+            $statusLabel.Text = 'Music installation stopped.'
             [Windows.Forms.MessageBox]::Show($message, $script:ToolName, 'OK', 'Error') | Out-Null
         }
     })

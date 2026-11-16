@@ -1,121 +1,57 @@
 # EUV Music Library Tool
 
-A small Windows 11 utility that adds personal MP3 files to Europa Universalis V. Imported songs join EU5's existing war and peace playlists and are registered in the native Music Player with a title and artist.
+Add MP3 songs to the Europa Universalis V Music Player and the war and peace playlists. Requires Windows 11, the Steam edition of EU5, and internet access for first-time setup.
 
-The tool creates a local EU5 mod. It does not overwrite the Steam installation, run in the background, change Steam launch options, upload music, or include copyrighted audio.
+## Quick start
 
-## Current validation status
+1. **Open the tool.** On GitHub, select **Code > Download ZIP**. In Downloads, right-click the ZIP, select **Extract All**, then **Extract**. Open the extracted folder and double-click **EUV Music Library Tool.cmd**.
+2. **Add songs.** Select **Add MP3 Files**, select MP3 songs, then select **Open**. Hold **Ctrl** to select several songs. The tool copies the files into the music library and lists the titles automatically.
+3. **Choose playback.** Leave **Both** for music during war and peace. For a different assignment, select **War** or **Peace** in the **Playback** column. Title and artist fields also support editing.
+4. **Install the music.** Select **Install Music**. If an FFmpeg setup prompt appears, select **Yes** and follow the installer prompts. After installation finishes, close and reopen the tool, then select **Install Music** again. Wait for **Library update complete**.
+5. **Enable the mod.** Open EU5 through Steam. In **Mods**, enable **EUV Music Library**, then restart EU5. Open the Music Player and look for an imported title.
 
-The library manager, MP3 metadata reader, stable identifiers, generated registrations, transaction recovery, and upstream-converter adaptation have automated checks. The generated mod still needs an end-to-end test on Windows 11 with a current EU5 installation before native-player and dynamic-playback support should be considered verified in game.
+Steam supplies the game location, including libraries on additional drives. Windows supplies the Documents location, including OneDrive redirection. Game-folder selection is automatic.
 
-The converter currently understands the EU5 sound-bank versions documented for game versions 1.3 (`150`) and 1.4 (`172`). It stops on an unknown version and restores the previous generated mod.
+## Updating the library
 
-## Requirements
+- **Add songs** with **Add MP3 Files**. Repeated imports of identical MP3 files under the same name skip the extra copy. Different recordings with matching filenames receive numbered copies.
+- **Remove songs** with **Remove Song**. Removal sends the selected library copies to the Recycle Bin.
+- Select **Install Music** after additions, edits, removals, or a major game update. Installing an empty library clears previously generated music.
+- For album folders, select **Open Music Folder**, copy the album folders into the open window, then select **Refresh** in the tool.
 
-- Windows 11
-- Europa Universalis V installed through Steam
-- Windows PowerShell 5.1, included with Windows 11
-- [FFmpeg](https://ffmpeg.org/)
-- Internet access during the first conversion to retrieve pinned conversion components
+## Troubleshooting
 
-Install FFmpeg in Windows Terminal:
+| Message or symptom | Next step |
+| --- | --- |
+| EU5 music files could not be found | Open **Steam > Library > Europa Universalis V**. Finish installation or pending updates. For an installed game, open **Properties > Installed Files > Verify integrity of game files**. Retry **Install Music**. |
+| FFmpeg setup unavailable | Install **App Installer** from Microsoft Store, reopen the tool, then select **Install Music**. |
+| Unknown sound-bank version | The pinned converter supports bank versions 150 and 172. Check for a converter update after a game patch. |
+| Imported titles missing | Enable **EUV Music Library** in **Mods**, disable competing music mods replacing the same sound bank, and restart EU5. |
 
-```powershell
-winget install --id Gyan.FFmpeg
-```
+## Technical details
 
-Restart the utility after installation.
+- Source MP3s reside under the Windows Documents folder in `Paradox Interactive\Europa Universalis V\music_library\tracks`. The generated mod resides in `Paradox Interactive\Europa Universalis V\mod\euv_music_library`.
+- Title and artist come from ID3 tags, with a fallback to `Artist - Title.mp3` or the filename and `Unknown Artist`. The artist supplies the composer and performer fields. Localization is English.
+- Stable track identifiers preserve assignments across metadata edits and same-content renames. Conversion reuses valid media and rebuilds the music banks. Transaction recovery restores the previous output after interrupted or failed conversion.
+- Automated checks cover library management, metadata, generated registrations, and recovery. Native Music Player and dynamic playback still require an in-game test on a supported EU5 installation.
 
-## Use
+### Command line
 
-1. Download this repository and extract it to a permanent folder.
-2. Double-click **EUV Music Library Tool.cmd**.
-3. Select **Open Music Folder** and copy MP3 files into the folder. Album subfolders are allowed.
-4. Return to the utility and select **Refresh**.
-5. Review or edit each title and artist, then choose **War**, **Peace**, or **Both**. New songs default to **Both**.
-6. Select **Convert and Implement**.
-7. Enable **EUV Music Library** in EU5's Mods screen once, then launch EU5 normally through Steam.
-
-The managed source folder is normally:
-
-```text
-Documents\Paradox Interactive\Europa Universalis V\music_library\tracks
-```
-
-The generated local mod is normally:
-
-```text
-Documents\Paradox Interactive\Europa Universalis V\mod\euv_music_library
-```
-
-Windows' configured Documents location is detected, including OneDrive redirection. Players who use EU5's `--userdir` option can pass the same location to the utility with `-Eu5UserDir`.
-
-## Metadata and identity
-
-The utility reads ID3v2 and ID3v1 title and artist tags. When tags are absent, a filename such as `Artist - Title.mp3` supplies both values; other filenames become the title with `Unknown Artist`.
-
-Each song receives a persistent internal identifier. Editing metadata or replacing the contents of the same managed file does not duplicate the track. A rename also keeps the identifier when the MP3 contents are unchanged.
-
-**Remove Song** explicitly sends the selected managed MP3 copy to the Windows Recycle Bin. Files outside the managed folder are never touched.
-
-## Generated integration
-
-One converted WEM file and one Wwise event identity are used for both playback paths:
-
-- dynamic insertion into the current EU5 war and/or peace playlist;
-- native Music Player registration, search, title localization, composer, and performer fields.
-
-The initial release maps the MP3 artist to both EU5's composer and performer fields because MP3 artist tags do not distinguish those roles. English localization is generated in this release.
-
-Generated files include:
-
-```text
-euv_music_library/
-├── .metadata/metadata.json
-├── loading_screen/sound/banks/windows/
-│   ├── eu4_soundtrack_music.bnk
-│   ├── eu4_soundtrack_media.bnk
-│   ├── SoundbanksInfo.json
-│   └── Media/<id>.wem
-├── in_game/common/music_player_tracks/euv_music_library.txt
-└── main_menu/localization/music_player_gui/euv_music_library_l_english.yml
-```
-
-The bank filenames retain the upstream converter's internal names. Disable other music mods that patch the same dynamic bank because EU5 cannot safely combine multiple replacements of that bank.
-
-Before installation, the tool checks the generated bank's binary object graph for EU5's native Music Player container and every generated track event. This prevents a structurally incomplete bank from replacing the last working output.
-
-## Reliability behavior
-
-- Existing valid conversions are reused; new or changed MP3 files are converted.
-- Deleted songs are removed from registrations and generated media on the next implementation.
-- Removing the final song clears the generated soundtrack.
-- Each implementation is transactional. If conversion, validation, or bank rebuilding fails, the previous generated mod is restored.
-- An interrupted transaction is recovered the next time the utility runs.
-- Unicode filenames are embedded in generated PowerShell with UTF-8 BOM for Windows PowerShell 5.1.
-- Requested WEM files and both banks are validated before the new state is committed.
-- Re-run **Convert and Implement** after a major EU5 update so the banks are rebuilt from the installed game version.
-
-## Command line
-
-The graphical interface is the normal entry point. A sync can also be run directly:
+For a custom EU5 `--userdir`, pass the matching user-data directory. The launcher also supports unattended sync.
 
 ```bat
+"EUV Music Library Tool.cmd" -Eu5UserDir "D:\Games\EU5 User Data"
 "EUV Music Library Tool.cmd" -Action Sync
-"EUV Music Library Tool.cmd" -Action Sync -Eu5UserDir "D:\Games\EU5 User Data"
 ```
 
-Run the independent checks from Windows PowerShell after installing FFmpeg:
+Run the checks with FFmpeg available on PATH.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 ```
 
-## Technical references and acknowledgments
+### Credits
 
-- [`komoreb11/eu5-music-converter`](https://github.com/komoreb11/eu5-music-converter) documents and implements the dynamic playlist bank format, WEM conversion, and EU5 bank versions 150 and 172. Because that repository currently declares no software license, its source is not copied here. At runtime this utility downloads a pinned, SHA-256-verified copy from the original repository and adapts it locally.
-- [`NikolayCoco/eu5_music_player_generator`](https://github.com/NikolayCoco/eu5_music_player_generator) documents Music Player event registration, track definitions, and localization. It is used as a technical reference; its unlicensed implementation and binaries are not copied here.
-- [`Europa-Universalis-5-Modding-Co-op/modding-digests`](https://github.com/Europa-Universalis-5-Modding-Co-op/modding-digests) confirms the generated `music_player_tracks` schema and EU5's native Music Player localization layout.
-- [`hcs64/ww2ogg`](https://github.com/hcs64/ww2ogg) is the reference for Wwise Vorbis packed codebooks used by the conversion pipeline.
-
-The pinned dynamic converter commit is `6e6480d442c365bec7cd2a5dde00966df4f89e81`, verified as SHA-256 `2f5d7cafc616668f19414077fba8189916c3e350c96b57a7d3f7b002b4c139cf` before execution.
+- Dynamic playlist banks and audio conversion use a pinned, SHA-256-verified runtime download from [komoreb11/eu5-music-converter](https://github.com/komoreb11/eu5-music-converter). Commit `6e6480d442c365bec7cd2a5dde00966df4f89e81`, SHA-256 `2f5d7cafc616668f19414077fba8189916c3e350c96b57a7d3f7b002b4c139cf`.
+- Music Player registration references [NikolayCoco/eu5_music_player_generator](https://github.com/NikolayCoco/eu5_music_player_generator) and the [EU5 modding digests](https://github.com/Europa-Universalis-5-Modding-Co-op/modding-digests).
+- Wwise Vorbis packed codebooks are documented by [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg).
