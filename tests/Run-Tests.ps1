@@ -109,11 +109,42 @@ try {
     Assert-True ($events.Count -eq 1) 'SoundbanksInfo should contain one native-player event'
     Assert-True ($events[0].Name -eq $active[0].EventName) 'event name should match the track registration'
 
+    $hircBodyStream = [IO.MemoryStream]::new()
+    $hircBodyWriter = [IO.BinaryWriter]::new($hircBodyStream)
+    $hircBodyWriter.Write([uint32]2)
+    $hircBodyWriter.Write([byte]13)
+    $hircBodyWriter.Write([uint32]4)
+    $hircBodyWriter.Write([uint32]0x3B5AE824)
+    $hircBodyWriter.Write([byte]4)
+    $hircBodyWriter.Write([uint32]4)
+    $hircBodyWriter.Write([uint32]$active[0].EventId)
+    $hircBodyWriter.Flush()
+    $hircBody = $hircBodyStream.ToArray()
+    $hircBodyWriter.Dispose()
+    $hircBodyStream.Dispose()
+
+    $bankStream = [IO.MemoryStream]::new()
+    $bankWriter = [IO.BinaryWriter]::new($bankStream)
+    $bankWriter.Write([Text.Encoding]::ASCII.GetBytes('HIRC'))
+    $bankWriter.Write([uint32]$hircBody.Length)
+    $bankWriter.Write($hircBody)
+    $bankWriter.Flush()
+    $syntheticBank = Join-Path $testRoot 'native-player-graph.bnk'
+    [IO.File]::WriteAllBytes($syntheticBank, $bankStream.ToArray())
+    $bankWriter.Dispose()
+    $bankStream.Dispose()
+
+    Assert-GeneratedMusicBank $syntheticBank $active
+    $hircObjects = Get-HircObjectMap $syntheticBank
+    Assert-True ($hircObjects[[string][uint32]0x3B5AE824] -eq 13) 'bank validation should find the native Music Player container'
+    Assert-True ($hircObjects[[string][uint32]$active[0].EventId] -eq 4) 'bank validation should find the generated player event'
+
     $definitionBytes = [IO.File]::ReadAllBytes($script:TrackDefinitionPath)
     Assert-True ($definitionBytes[0] -eq 0xef -and $definitionBytes[1] -eq 0xbb -and $definitionBytes[2] -eq 0xbf) 'track definitions should use UTF-8 BOM'
     $definitions = Get-Content -LiteralPath $script:TrackDefinitionPath -Raw -Encoding UTF8
     Assert-True ($definitions.Contains($active[0].EventName)) 'track definitions should reference the Wwise event'
     $localization = Get-Content -LiteralPath $script:LocalizationPath -Raw -Encoding UTF8
+    Assert-True ($script:LocalizationPath -match 'main_menu[\\/]localization[\\/]music_player_gui') 'localization should use EU5 native Music Player discovery path'
     Assert-True ($localization.Contains('Été Nocturne')) 'title should be localized'
     Assert-True ($localization.Contains('Anaïs & Co.')) 'artist should be localized'
 

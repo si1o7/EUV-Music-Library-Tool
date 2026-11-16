@@ -35,7 +35,7 @@ $script:ModDir = Join-Path $script:Eu5UserDir 'mod\euv_music_library'
 $script:BanksDir = Join-Path $script:ModDir 'loading_screen\sound\banks\windows'
 $script:MediaDir = Join-Path $script:BanksDir 'Media'
 $script:TrackDefinitionPath = Join-Path $script:ModDir 'in_game\common\music_player_tracks\euv_music_library.txt'
-$script:LocalizationPath = Join-Path $script:ModDir 'main_menu\localization\english\euv_music_library_l_english.yml'
+$script:LocalizationPath = Join-Path $script:ModDir 'main_menu\localization\music_player_gui\euv_music_library_l_english.yml'
 $script:CacheDir = Join-Path $env:LOCALAPPDATA 'EUV-Music-Library-Tool'
 $script:UpstreamPath = Join-Path $script:CacheDir "EU4_Soundtrack_Setup-$($script:UpstreamCommit).ps1"
 $script:PatchedPath = Join-Path $script:CacheDir 'EUV-Music-Library-Generated.ps1'
@@ -477,6 +477,16 @@ function Find-Ogg([string]$SourceOgg, [string]$DlcDir, [string]$Eu4Path) {
     if ($next -eq $patched) { throw 'Could not adapt the upstream audio-file lookup.' }
     $patched = $next
 
+    # Player-triggered segments use the vanilla Music Player random/sequence container as
+    # their direct parent. The full EU5 base bank copied by the converter already contains
+    # this object (0x3B5AE824), for both supported bank versions.
+    $playerSegmentOriginal = 'modObjs.Add(MusicSegment(sid,tid,durMs,0));'
+    $playerSegmentIntegrated = 'modObjs.Add(MusicSegment(sid,tid,durMs,0x3B5AE824));'
+    if (-not $patched.Contains($playerSegmentOriginal)) {
+        throw 'Could not attach imported events to the native Music Player container.'
+    }
+    $patched = $patched.Replace($playerSegmentOriginal, $playerSegmentIntegrated)
+
     $patched = $patched.Replace('EU4 Soundtrack for EU5', 'EUV Music Library')
     $patched = $patched.Replace('Locating EU4...', 'Locating your music library...')
     $patched = $patched.Replace('EU4 not found. Make sure Europa Universalis IV is installed on this Steam account.', 'The local music library folder was not found.')
@@ -853,6 +863,51 @@ function Add-WemEventLabel([string]$Path, [string]$EventName) {
     return $false
 }
 
+function Get-HircObjectMap([string]$BankPath) {
+    $bank = [IO.File]::ReadAllBytes($BankPath)
+    $chunksPosition = 0
+    while ($chunksPosition + 8 -le $bank.Length) {
+        $chunkName = [Text.Encoding]::ASCII.GetString($bank, $chunksPosition, 4)
+        $chunkSize = [BitConverter]::ToUInt32($bank, $chunksPosition + 4)
+        $chunkEnd = $chunksPosition + 8 + [int64]$chunkSize
+        if ($chunkEnd -gt $bank.Length) { throw "Malformed sound-bank chunk in $BankPath" }
+        if ($chunkName -eq 'HIRC') {
+            if ($chunkSize -lt 4) { throw "Malformed HIRC chunk in $BankPath" }
+            $count = [BitConverter]::ToUInt32($bank, $chunksPosition + 8)
+            $objectPosition = $chunksPosition + 12
+            $objects = @{}
+            for ([uint32]$index = 0; $index -lt $count; $index++) {
+                if ($objectPosition + 9 -gt $chunkEnd) { throw "Truncated HIRC object in $BankPath" }
+                $objectType = $bank[$objectPosition]
+                $objectSize = [BitConverter]::ToUInt32($bank, $objectPosition + 1)
+                if ($objectSize -lt 4 -or $objectPosition + 5 + [int64]$objectSize -gt $chunkEnd) {
+                    throw "Invalid HIRC object size in $BankPath"
+                }
+                $objectId = [BitConverter]::ToUInt32($bank, $objectPosition + 5)
+                $objects[[string]$objectId] = [int]$objectType
+                $objectPosition += 5 + [int]$objectSize
+            }
+            return $objects
+        }
+        $chunksPosition = [int]$chunkEnd
+    }
+    throw "HIRC chunk was not found in $BankPath"
+}
+
+function Assert-GeneratedMusicBank([string]$BankPath, [object[]]$Tracks) {
+    $objects = Get-HircObjectMap $BankPath
+    $playerPoolId = [string][uint32]0x3B5AE824
+    if (-not $objects.ContainsKey($playerPoolId) -or $objects[$playerPoolId] -ne 13) {
+        throw 'The generated bank does not contain the expected native Music Player container.'
+    }
+    foreach ($track in $Tracks) {
+        $eventId = [string][uint32]$track.EventId
+        if (-not $objects.ContainsKey($eventId) -or $objects[$eventId] -ne 4) {
+            throw "The generated bank is missing the Music Player event for '$($track.Title)'."
+        }
+    }
+}
+
 function Clear-GeneratedMod {
     Restore-SyncBackup
     $ids = @()
@@ -964,6 +1019,7 @@ function Sync-Library {
                 throw "The converter did not produce a valid $bankName file."
             }
         }
+        Assert-GeneratedMusicBank (Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk') $tracks
         Write-SoundbanksInfo $tracks
         Write-MusicPlayerRegistration $tracks
         Save-GeneratedState $tracks

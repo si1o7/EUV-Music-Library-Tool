@@ -78,10 +78,12 @@ euv_music_library/
 │   ├── SoundbanksInfo.json
 │   └── Media/<id>.wem
 ├── in_game/common/music_player_tracks/euv_music_library.txt
-└── main_menu/localization/english/euv_music_library_l_english.yml
+└── main_menu/localization/music_player_gui/euv_music_library_l_english.yml
 ```
 
 The bank filenames retain the upstream converter's internal names. Disable other music mods that patch the same dynamic bank because EU5 cannot safely combine multiple replacements of that bank.
+
+Before installation, the tool checks the generated bank's binary object graph for EU5's native Music Player container and every generated track event. This prevents a structurally incomplete bank from replacing the last working output.
 
 ## Reliability behavior
 
@@ -113,6 +115,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 
 - [`komoreb11/eu5-music-converter`](https://github.com/komoreb11/eu5-music-converter) documents and implements the dynamic playlist bank format, WEM conversion, and EU5 bank versions 150 and 172. Because that repository currently declares no software license, its source is not copied here. At runtime this utility downloads a pinned, SHA-256-verified copy from the original repository and adapts it locally.
 - [`NikolayCoco/eu5_music_player_generator`](https://github.com/NikolayCoco/eu5_music_player_generator) documents Music Player event registration, track definitions, and localization. It is used as a technical reference; its unlicensed implementation and binaries are not copied here.
+- [`Europa-Universalis-5-Modding-Co-op/modding-digests`](https://github.com/Europa-Universalis-5-Modding-Co-op/modding-digests) confirms the generated `music_player_tracks` schema and EU5's native Music Player localization layout.
 - [`hcs64/ww2ogg`](https://github.com/hcs64/ww2ogg) is the reference for Wwise Vorbis packed codebooks used by the conversion pipeline.
 
 The pinned dynamic converter commit is `6e6480d442c365bec7cd2a5dde00966df4f89e81`, verified as SHA-256 `2f5d7cafc616668f19414077fba8189916c3e350c96b57a7d3f7b002b4c139cf` before execution.
