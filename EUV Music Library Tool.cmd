@@ -5,6 +5,6 @@ set "EUV_TOOL_EXIT=%ERRORLEVEL%"
 if not "%EUV_TOOL_EXIT%"=="0" (
     echo.
     echo EUV Music Library Tool stopped with an error.
-    pause
+    if "%~1"=="" pause
 )
 exit /b %EUV_TOOL_EXIT%

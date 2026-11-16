@@ -2,6 +2,12 @@
 
 A Windows utility for importing MP3 files into Europa Universalis V as a local music mod. Imported tracks appear in the Music Player and can be assigned to the war playlist, the peace playlist, or both.
 
+## Compatibility and validation
+
+The converter supports EU5 sound-bank versions **150** and **172**, associated with game versions 1.3 and 1.4. The tool checks the installed bank before conversion and stops on an unsupported version. Competing music mods replacing the same music bank must be disabled.
+
+Windows PowerShell 5.1 checks cover metadata, imports, generated registrations, recovery, filename handling, and converter adaptation. Native Music Player and dynamic playlist playback still require an end-to-end in-game test. Compatibility with multiplayer and achievements is unverified.
+
 ## Requirements
 
 - Windows 11 with Windows PowerShell 5.1
@@ -18,12 +24,23 @@ The tool detects the game installation through Steam, including libraries on add
 
 ## Usage
 
+Close EU5 before installing or rebuilding the music mod. First-time conversion downloads the converter and supporting audio tools. Conversion time and temporary disk usage depend on track count and duration.
+
 1. Select **Add MP3 Files** to import tracks. To import album folders, select **Open Music Folder**, copy the folders into the library, then select **Refresh**.
 2. Review the **Title** and **Artist** fields. Set **Playback** to **War**, **Peace**, or **Both**. New tracks default to **Both**.
 3. Select **Install Music** and wait for **Library update complete**.
 4. Open EU5 through Steam, enable **EUV Music Library** in **Mods**, and restart the game. Imported titles are available for selection in the Music Player.
 
 Select **Install Music** after library edits or a major EU5 update to rebuild the mod. **Remove Song** moves selected library copies to the Recycle Bin. Installing an empty library clears the generated soundtrack.
+
+## Library maintenance
+
+The music library and saved assignments reside in the Windows Documents folder, independently of the extracted tool folder. Windows Documents redirection, including OneDrive, is detected automatically.
+
+- **Update the tool.** Close the tool, extract a fresh repository download, and launch the new copy. Existing songs and assignments are reused when the same EU5 user-data directory is selected.
+- **Back up the library.** Close the tool and copy the entire `Paradox Interactive\Europa Universalis V\music_library` folder to a backup location. Include `library.json` to preserve titles, artists, and playback assignments.
+- **Disable the mod.** Disable **EUV Music Library** in EU5's **Mods** screen and restart the game.
+- **Remove the mod.** Close EU5 and the tool, then delete `Paradox Interactive\Europa Universalis V\mod\euv_music_library`. Delete the extracted tool folder when no longer needed. Retain or back up `music_library` before deleting the source MP3 collection.
 
 ## Troubleshooting
 
@@ -35,12 +52,14 @@ Select **Install Music** after library edits or a major EU5 update to rebuild th
 | Unknown sound-bank version | The pinned converter supports bank versions 150 and 172. Check for a converter update after a game patch. |
 | A title is missing from the Music Player | Check the title in the tool's song list and confirm conversion completed. Enable **EUV Music Library** in **Mods**, disable competing music mods replacing the same bank, then restart EU5. |
 
+Report reproducible failures through GitHub Issues with the EU5 version, Windows version, tool commit, exact error message, and reproduction steps. Include whether the failure occurs with a single MP3 or multiple tracks. Review diagnostic text for personal file paths before posting.
+
 ## Technical details
 
 - Source MP3s reside under the Windows Documents folder in `Paradox Interactive\Europa Universalis V\music_library\tracks`. The generated mod resides in `Paradox Interactive\Europa Universalis V\mod\euv_music_library`.
 - Title and artist come from ID3 tags, with a fallback to `Artist - Title.mp3` or the filename and `Unknown Artist`. The artist supplies the composer and performer fields. Localization is English.
 - Stable track identifiers preserve assignments across metadata edits and same-content renames. Conversion reuses valid media and rebuilds the music banks. Transaction recovery restores the previous output after interrupted or failed conversion.
-- Automated checks cover library management, metadata, generated registrations, and recovery. Native Music Player and dynamic playback still require an in-game test on a supported EU5 installation.
+- The tool allows one library window per Windows session and rejects overlapping conversions. The generated converter and audio helpers use a dedicated local cache.
 
 ## Command line
 
@@ -58,6 +77,8 @@ Run the PowerShell test suite with FFmpeg available on PATH.
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 ```
+
+The test suite also accepts `-ConverterSource <path>` for a locally downloaded copy of the pinned upstream script. The script's checksum is verified before the generated converter's syntax, quoting, cache isolation, and native invocation are checked. Tests use synthetic audio and bank fixtures. In-game acceptance requires checking imported titles, direct playback, war and peace assignments, and disable/re-enable behavior on the installed EU5 version.
 
 ## Credits & Disclosures
 

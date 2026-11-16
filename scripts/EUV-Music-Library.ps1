@@ -25,7 +25,7 @@ if ([string]::IsNullOrWhiteSpace($Eu5UserDir)) {
     $Eu5UserDir = Join-Path $documents 'Paradox Interactive\Europa Universalis V'
 }
 
-$script:Eu5UserDir = $Eu5UserDir
+$script:Eu5UserDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Eu5UserDir)
 $script:LibraryDir = Join-Path $script:Eu5UserDir 'music_library'
 $script:TracksDir = Join-Path $script:LibraryDir 'tracks'
 $script:ManifestPath = Join-Path $script:LibraryDir 'library.json'
@@ -200,7 +200,17 @@ function Read-Manifest {
 
 function Save-Manifest($Manifest) {
     $json = $Manifest | ConvertTo-Json -Depth 6
-    [IO.File]::WriteAllText($script:ManifestPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    $temporary = $script:ManifestPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::Exists($script:ManifestPath)) {
+            [IO.File]::Replace($temporary, $script:ManifestPath, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $script:ManifestPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
 }
 
 function Get-SourceFiles {
@@ -377,7 +387,7 @@ function Install-LocalMod {
         version = '1.0.0'
         game_id = 'eu5'
         supported_game_version = '1.*'
-        short_description = 'Adds locally owned music to EU5 dynamic war, peace, and cultural playlists.'
+        short_description = 'Adds local MP3 music to the EU5 Music Player and war and peace playlists.'
         tags = @('Music')
         relationships = @()
         game_custom_data = @{}
@@ -450,7 +460,7 @@ function Get-VerifiedUpstreamScript {
 }
 
 function ConvertTo-PowerShellLiteral([string]$Value) {
-    return "'" + $Value.Replace("'", "''") + "'"
+    return "'" + [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Value) + "'"
 }
 
 function New-PatchedConverter([object[]]$Tracks, [string]$GameBank) {
@@ -467,17 +477,6 @@ if ([string]::IsNullOrWhiteSpace($ModDir) -or -not (Test-Path -LiteralPath $ModD
     $modBlockRegex = New-Object Text.RegularExpressions.Regex($modBlockPattern)
     $patched = $modBlockRegex.Replace($source, [Text.RegularExpressions.MatchEvaluator]{ param($match) $modBlockReplacement }, 1)
     if ($patched -eq $source) { throw 'Could not adapt the upstream mod-directory block.' }
-
-    $trackLines = foreach ($track in $Tracks) {
-        $record = "$($track.EventName)|$($track.File)||$($track.Mood)|$($track.Culture)"
-        '    ' + (ConvertTo-PowerShellLiteral $record)
-    }
-    $trackBlock = "`$Tracks = @(`r`n" + ($trackLines -join "`r`n") + "`r`n)"
-    $trackPattern = '(?s)\$Tracks\s*=\s*@\(.*?\)\s*(?=# --- FUNCTIONS)'
-    $trackRegex = New-Object Text.RegularExpressions.Regex($trackPattern)
-    $next = $trackRegex.Replace($patched, [Text.RegularExpressions.MatchEvaluator]{ param($match) $trackBlock + "`r`n`r`n" }, 1)
-    if ($next -eq $patched) { throw 'Could not adapt the upstream track list.' }
-    $patched = $next
 
     $findEu4Pattern = '(?s)function Find-EU4Path\s*\{.*?\}\s*(?=# Source of a track:)'
     $findEu4Replacement = @'
@@ -520,12 +519,38 @@ function Find-Ogg([string]$SourceOgg, [string]$DlcDir, [string]$Eu4Path) {
     }
     $patched = $patched.Replace($playerSegmentOriginal, $playerSegmentIntegrated)
 
+    # Keep compiled helper code and conversion tools independent of upstream caches.
+    $patched = $patched.Replace('$env:TEMP\eu4wem_cache', '$env:LOCALAPPDATA\EUV-Music-Library-Tool\converter-v2')
+    $patched = $patched.Replace('eu4snd_extract', 'euv_music_library_extract')
+    $patched = $patched.Replace('eu4snd_v2', 'euv_music_library_audio')
+
+    # Invoke native tools directly so percent signs and other filename characters
+    # retain literal meaning. Use the converter's existing temporary WAV path.
+    $pipePattern = '(?m)^\s*\$r = cmd /c .*\r?\n\s*if \(\$LASTEXITCODE -ne 0 -or -not \(Test-Path \$ogg\)\) \{'
+    $pipeRegex = New-Object Text.RegularExpressions.Regex($pipePattern)
+    if ($pipeRegex.Matches($patched).Count -ne 1) { throw 'Could not adapt the converter audio invocation.' }
+    $patched = $pipeRegex.Replace($patched, '', 1)
+    $fallbackEnd = New-Object Text.RegularExpressions.Regex('(?m)^\s*\}\r?\n(?=\s*# Step 3: OGG)')
+    if ($fallbackEnd.Matches($patched).Count -ne 1) { throw 'Could not adapt the converter WAV fallback.' }
+    $patched = $fallbackEnd.Replace($patched, '', 1)
+
     $patched = $patched.Replace('EU4 Soundtrack for EU5', 'EUV Music Library')
-    $patched = $patched.Replace('$eu5Bank = Find-EU5MusicBank', '$eu5Bank = ' + (ConvertTo-PowerShellLiteral $GameBank))
     $patched = $patched.Replace('Locating EU4...', 'Locating the music library...')
     $patched = $patched.Replace('EU4 not found. Make sure Europa Universalis IV is installed on this Steam account.', 'The local music library folder was not found.')
     $patched = $patched.Replace('EU4: $eu4Path', 'Music library: $eu4Path')
     $patched = $patched.Replace('Not found in EU4 folder', 'Not found in music library')
+
+    # Insert user-controlled paths after all upstream text rewrites.
+    $trackLines = foreach ($track in $Tracks) {
+        $record = "$($track.EventName)|$($track.File)||$($track.Mood)|$($track.Culture)"
+        '    ' + (ConvertTo-PowerShellLiteral $record)
+    }
+    $trackBlock = "`$Tracks = @(`r`n" + ($trackLines -join "`r`n") + "`r`n)"
+    $trackPattern = '(?s)\$Tracks\s*=\s*@\(.*?\)\s*(?=# --- FUNCTIONS)'
+    $trackRegex = New-Object Text.RegularExpressions.Regex($trackPattern)
+    $next = $trackRegex.Replace($patched, [Text.RegularExpressions.MatchEvaluator]{ param($match) $trackBlock + "`r`n`r`n" }, 1)
+    if ($next -eq $patched) { throw 'Could not adapt the upstream track list.' }
+    $patched = $next.Replace('$eu5Bank = Find-EU5MusicBank', '$eu5Bank = ' + (ConvertTo-PowerShellLiteral $GameBank))
 
     # Windows PowerShell 5.1 treats BOM-less scripts as the active ANSI code page.
     # A BOM preserves Unicode filenames embedded in the generated track list.
@@ -666,7 +691,7 @@ function Restore-SyncBackup {
         foreach ($file in Get-ChildItem -LiteralPath $backupMedia -File -Filter '*.wem') {
             $id = Get-ValidatedWemId $file.BaseName
             if ($null -ne $id) {
-                Move-Item -LiteralPath $file.FullName -Destination (Join-Path $script:MediaDir "$id.wem") -Force
+                Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $script:MediaDir "$id.wem") -Force
             }
         }
     }
@@ -686,7 +711,7 @@ function Restore-SyncBackup {
             Copy-Item -LiteralPath $backup -Destination $live -Force
         }
     }
-    Remove-Item -LiteralPath $script:BackupDir -Recurse -Force
+    Complete-OutputTransaction
     Write-Notice 'Restored the previously working generated soundtrack after an interrupted or failed sync.'
 }
 
@@ -788,6 +813,10 @@ function Start-OutputTransaction([object[]]$Tracks) {
 
 function Complete-OutputTransaction {
     if (Test-Path -LiteralPath $script:BackupDir -PathType Container) {
+        # Recovery must not roll back committed output if cleanup is interrupted.
+        $temporary = Join-Path $script:BackupDir 'transaction.json.tmp'
+        [IO.File]::WriteAllText($temporary, '{"initialized":false}')
+        Move-Item -LiteralPath $temporary -Destination (Join-Path $script:BackupDir 'transaction.json') -Force
         Remove-Item -LiteralPath $script:BackupDir -Recurse -Force
     }
 }
@@ -800,11 +829,14 @@ function Test-WemFile([string]$Path) {
             if ($stream.Length -le 22) { return $false }
             $bytes = New-Object byte[] 22
             if ($stream.Read($bytes, 0, 22) -ne 22) { return $false }
+            if ([int64][BitConverter]::ToUInt32($bytes, 4) + 8 -ne $stream.Length) { return $false }
         } finally {
             $stream.Dispose()
         }
         return $bytes[0] -eq 0x52 -and $bytes[1] -eq 0x49 -and
-            $bytes[2] -eq 0x46 -and $bytes[3] -eq 0x46 -and $bytes[20] -eq 0xff -and $bytes[21] -eq 0xff
+            $bytes[2] -eq 0x46 -and $bytes[3] -eq 0x46 -and
+            [Text.Encoding]::ASCII.GetString($bytes, 8, 4) -eq 'WAVE' -and
+            $bytes[20] -eq 0xff -and $bytes[21] -eq 0xff
     } catch {
         return $false
     }
@@ -839,15 +871,20 @@ function Add-WemEventLabel([string]$Path, [string]$EventName) {
         $id = [Text.Encoding]::ASCII.GetString($source, $position, 4)
         $size = [BitConverter]::ToUInt32($source, $position + 4)
         $total = 8 + [int64]$size + ($size % 2)
-        if ($position + $total -gt $source.Length) { throw "Malformed RIFF chunk in $Path" }
+        $available = $total
+        if ($id -eq 'data' -and ($size % 2) -eq 1 -and $position + $total -eq $source.Length + 1) {
+            # The converter omits the pad on a terminal odd-sized data chunk.
+            $available--
+        }
+        if ($position + $available -gt $source.Length) { throw "Malformed RIFF chunk in $Path" }
         $raw = New-Object byte[] ([int]$total)
-        [Array]::Copy($source, $position, $raw, 0, $raw.Length)
+        [Array]::Copy($source, $position, $raw, 0, [int]$available)
         if ($id -eq 'data') {
             $dataChunk = $raw
         } elseif ($id -notin @('cue ', 'LIST')) {
             $preservedChunks.Add($raw)
         }
-        $position += [int]$total
+        $position += [int]$available
     }
     if ($null -eq $dataChunk) { throw "WEM data chunk was not found: $Path" }
 
@@ -882,12 +919,7 @@ function Add-WemEventLabel([string]$Path, [string]$EventName) {
     }
     [BitConverter]::GetBytes([uint32]($output.Length - 8)).CopyTo($output, 4)
 
-    $same = $source.Length -eq $output.Length
-    if ($same) {
-        for ($index = 0; $index -lt $source.Length; $index++) {
-            if ($source[$index] -ne $output[$index]) { $same = $false; break }
-        }
-    }
+    $same = [Linq.Enumerable]::SequenceEqual([byte[]]$source, [byte[]]$output)
     if (-not $same) {
         $temporary = "$Path.labeling"
         [IO.File]::WriteAllBytes($temporary, $output)
@@ -1014,8 +1046,34 @@ function Invoke-GeneratedConverter([string]$ConverterPath) {
 }
 
 function Sync-Library {
+    $mutex = New-Object Threading.Mutex($false, 'Local\EUV-Music-Library-Conversion')
+    $acquired = $false
+    try {
+        try { $acquired = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) { throw 'Another music conversion is running. Wait for completion, then retry.' }
+        return Sync-LibraryOutput
+    } finally {
+        if ($acquired) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+function Assert-GameBank([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 12
+        if ($stream.Read($header, 0, 12) -ne 12 -or [Text.Encoding]::ASCII.GetString($header, 0, 4) -ne 'BKHD') {
+            throw 'Unexpected EU5 sound-bank layout. Verify the installed game files through Steam.'
+        }
+        $version = [BitConverter]::ToUInt32($header, 8)
+        if ($version -notin @(150, 172)) { throw "EU5 sound-bank version $version is unsupported. A converter update is required." }
+    } finally { $stream.Dispose() }
+}
+
+function Sync-LibraryOutput {
     Write-Heading 'Syncing EUV Music Library'
     Install-LocalMod
+    Restore-SyncBackup
     $manifest = Update-ManifestFromFiles
     $tracks = @(Get-ActiveTracks $manifest)
     if ($tracks.Count -eq 0) {
@@ -1026,6 +1084,7 @@ function Sync-Library {
 
     Write-Host "Preparing $($tracks.Count) track(s)..."
     $gameBank = Find-GameBank @(Get-SteamRoots)
+    Assert-GameBank $gameBank
     Assert-Ffmpeg
     $converter = New-PatchedConverter $tracks $gameBank
     try {
@@ -1091,6 +1150,19 @@ function Open-LibraryFolder {
 }
 
 function Show-MusicLibraryWindow {
+    $mutex = New-Object Threading.Mutex($false, 'Local\EUV-Music-Library-Window')
+    $acquired = $false
+    try {
+        try { $acquired = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) { throw 'EUV Music Library Tool is already open. Use the existing window.' }
+        Show-MusicLibraryContents
+    } finally {
+        if ($acquired) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+function Show-MusicLibraryContents {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName Microsoft.VisualBasic

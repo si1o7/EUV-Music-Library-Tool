@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param()
+param([string]$ConverterSource = '')
 
 $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("euv-music-library-tests-" + [Guid]::NewGuid().ToString('N'))
@@ -12,6 +12,29 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 try {
     . $scriptPath -Action Install -Eu5UserDir $testRoot
+
+    $quotedPath = "L" + [char]0x2019 + "ete's 100% [live] & mix.mp3"
+    $literal = ConvertTo-PowerShellLiteral $quotedPath
+    Assert-True ((& ([scriptblock]::Create($literal))) -eq $quotedPath) 'PowerShell literals should preserve apostrophes and Unicode quotes'
+    $versionPath = Join-Path $testRoot 'version.bnk'
+    $versionHeader = New-Object byte[] 12
+    [Text.Encoding]::ASCII.GetBytes('BKHD').CopyTo($versionHeader, 0)
+    foreach ($version in @(150, 172)) {
+        [BitConverter]::GetBytes([uint32]$version).CopyTo($versionHeader, 8)
+        [IO.File]::WriteAllBytes($versionPath, $versionHeader)
+        Assert-GameBank $versionPath
+    }
+    [BitConverter]::GetBytes([uint32]999).CopyTo($versionHeader, 8)
+    [IO.File]::WriteAllBytes($versionPath, $versionHeader)
+    $unsupported = $false
+    try { Assert-GameBank $versionPath } catch { $unsupported = $true }
+    Assert-True $unsupported 'unsupported banks should fail before conversion'
+    $mutex = New-Object Threading.Mutex($false, 'Local\EUV-Music-Library-Conversion')
+    [void]$mutex.WaitOne()
+    try {
+        $blocked = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath -Action Sync -Eu5UserDir $testRoot 2>&1
+        Assert-True ($LASTEXITCODE -ne 0 -and ($blocked -join "`n") -like '*Another music conversion*') 'overlapping conversions should fail before changing library state'
+    } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
 
     $steam = Join-Path $testRoot 'Steam'
     $library = Join-Path $testRoot 'Second Library'
@@ -110,6 +133,7 @@ try {
     $wemPath = Join-Path $script:MediaDir "$($active[0].WemId).wem"
     $wem = New-Object byte[] 100
     [Text.Encoding]::ASCII.GetBytes('RIFF').CopyTo($wem, 0)
+    [BitConverter]::GetBytes([uint32]92).CopyTo($wem, 4)
     [Text.Encoding]::ASCII.GetBytes('WAVE').CopyTo($wem, 8)
     [Text.Encoding]::ASCII.GetBytes('fmt ').CopyTo($wem, 12)
     [BitConverter]::GetBytes([uint32]66).CopyTo($wem, 16)
@@ -128,6 +152,18 @@ try {
     $validWemLength = $labeledWem.Length
     Assert-True ([Text.Encoding]::ASCII.GetString($labeledWem).Contains($active[0].EventName)) 'WEM cue label should contain the event name'
     Assert-True (Test-WemFile $wemPath) 'labeled WEM should remain valid'
+
+    $oddWem = New-Object byte[] 99
+    [Array]::Copy($wem, $oddWem, $oddWem.Length)
+    [BitConverter]::GetBytes([uint32]91).CopyTo($oddWem, 4)
+    [BitConverter]::GetBytes([uint32]5).CopyTo($oddWem, 90)
+    $oddPath = Join-Path $testRoot 'odd-data.wem'
+    [IO.File]::WriteAllBytes($oddPath, $oddWem)
+    Assert-True (Add-WemEventLabel $oddPath $active[0].EventName) 'terminal odd data without padding should be normalized'
+    Assert-True (-not (Add-WemEventLabel $oddPath $active[0].EventName)) 'normalized odd data should be stable'
+    $oddLabeled = [IO.File]::ReadAllBytes($oddPath)
+    Assert-True (($oddLabeled.Length % 2) -eq 0 -and $oddLabeled[-1] -eq 0) 'odd data should receive a zero pad'
+    Assert-True ([BitConverter]::ToUInt32($oddLabeled, 4) -eq $oddLabeled.Length - 8) 'RIFF length should include padding'
 
     Write-SoundbanksInfo $active
     Write-MusicPlayerRegistration $active
@@ -188,6 +224,17 @@ try {
     [IO.File]::WriteAllBytes($wemPath, [byte[]](9, 9, 9))
     [IO.File]::WriteAllBytes((Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk'), [byte[]](9, 9, 9))
     Save-GeneratedState @($changedTrack)
+    function Copy-Item {
+        param($LiteralPath, $Destination, [switch]$Force)
+        if ($Destination -eq (Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk')) { throw 'Simulated recovery interruption' }
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
+    }
+    try {
+        $interrupted = $false
+        try { Restore-SyncBackup } catch { $interrupted = $true }
+        Assert-True $interrupted 'recovery interruption should be exercised'
+        Assert-True (Test-Path -LiteralPath (Join-Path $script:BackupDir "Media\$($active[0].WemId).wem")) 'recovery must retain backup audio until completion'
+    } finally { Remove-Item Function:\Copy-Item }
     Restore-SyncBackup
     Assert-True (([IO.File]::ReadAllBytes($wemPath)).Length -eq $validWemLength) 'failed sync should restore the previous WEM'
     Assert-True (([IO.File]::ReadAllBytes((Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk')))[0] -eq 10) 'failed sync should restore the previous bank'
@@ -206,6 +253,26 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $wemPath)) 'empty-library cleanup should remove generated media'
     Assert-True (-not (Test-Path -LiteralPath $script:TrackDefinitionPath)) 'empty-library cleanup should remove player registration'
     Assert-True (-not (Test-Path -LiteralPath $script:LocalizationPath)) 'empty-library cleanup should remove localization'
+
+    if ($ConverterSource) {
+        $script:UpstreamPath = Join-Path $testRoot 'upstream.ps1'
+        $script:PatchedPath = Join-Path $testRoot 'generated.ps1'
+        Copy-Item -LiteralPath $ConverterSource -Destination $script:UpstreamPath
+        $probeTrack = $active[0].PSObject.Copy()
+        $probeTrack.File = "eu4snd_v2 eu4snd_extract EU4 Soundtrack for EU5 $quotedPath"
+        $probeBank = Join-Path $testRoot $probeTrack.File
+        $converter = New-PatchedConverter @($probeTrack) $probeBank
+        $parseErrors = $null
+        [void][Management.Automation.Language.Parser]::ParseFile($converter, [ref]$null, [ref]$parseErrors)
+        Assert-True ($parseErrors.Count -eq 0) 'generated converter should parse in Windows PowerShell'
+        $generated = Get-Content -LiteralPath $converter -Raw -Encoding UTF8
+        Assert-True (-not $generated.Contains('$r = cmd /c')) 'audio paths should bypass cmd expansion'
+        Assert-True (-not $generated.Contains('$env:TEMP\eu4wem_cache')) 'patched helpers should use a private cache'
+        Assert-True ($generated.Contains('EUV-Music-Library-Tool\converter-v2')) 'private cache version should be embedded'
+        $record = "$($probeTrack.EventName)|$($probeTrack.File)||$($probeTrack.Mood)|$($probeTrack.Culture)"
+        Assert-True ($generated.Contains((ConvertTo-PowerShellLiteral $record))) 'upstream replacements should preserve literal track paths'
+        Assert-True ($generated.Contains((ConvertTo-PowerShellLiteral $probeBank))) 'upstream replacements should preserve the game path'
+    }
 
     Write-Host 'All EUV Music Library Tool tests passed.' -ForegroundColor Green
 } finally {

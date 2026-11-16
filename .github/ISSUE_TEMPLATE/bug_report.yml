@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible installation, conversion, or playback failure.
+body:
+  - type: input
+    id: game
+    attributes:
+      label: EU5 version
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows version and tool commit
+      description: The commit is available in the repository history.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the import method, track count, playback assignment, and enabled music mods.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual results
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message
+      description: Paste the exact error text. Remove personal file paths before posting.
