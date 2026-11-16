@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Sync', 'SyncAndLaunch', 'OpenLibrary', 'EditManifest')]
+    [ValidateSet('Menu', 'Install', 'Sync', 'OpenLibrary')]
     [string]$Action = 'Menu',
 
     [string]$Eu5UserDir = ''
@@ -14,9 +14,8 @@ $script:ToolName = 'EUV Music Library Tool'
 $script:UpstreamCommit = '6e6480d442c365bec7cd2a5dde00966df4f89e81'
 $script:UpstreamSha256 = '2f5d7cafc616668f19414077fba8189916c3e350c96b57a7d3f7b002b4c139cf'
 $script:UpstreamUrl = "https://raw.githubusercontent.com/komoreb11/eu5-music-converter/$($script:UpstreamCommit)/EU4_Soundtrack_Setup.ps1"
-$script:SupportedExtensions = @('.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.wma')
+$script:SupportedExtensions = @('.mp3')
 $script:ValidMoods = @('both', 'war', 'peace')
-$script:ValidCultures = @('', 'european', 'east_asian', 'african', 'middle_east', 'indian', 'north_american', 'south_american')
 
 if ([string]::IsNullOrWhiteSpace($Eu5UserDir)) {
     $documents = [Environment]::GetFolderPath('MyDocuments')
@@ -35,6 +34,8 @@ $script:BackupDir = Join-Path $script:LibraryDir '.sync-backup'
 $script:ModDir = Join-Path $script:Eu5UserDir 'mod\euv_music_library'
 $script:BanksDir = Join-Path $script:ModDir 'loading_screen\sound\banks\windows'
 $script:MediaDir = Join-Path $script:BanksDir 'Media'
+$script:TrackDefinitionPath = Join-Path $script:ModDir 'in_game\common\music_player_tracks\euv_music_library.txt'
+$script:LocalizationPath = Join-Path $script:ModDir 'main_menu\localization\english\euv_music_library_l_english.yml'
 $script:CacheDir = Join-Path $env:LOCALAPPDATA 'EUV-Music-Library-Tool'
 $script:UpstreamPath = Join-Path $script:CacheDir "EU4_Soundtrack_Setup-$($script:UpstreamCommit).ps1"
 $script:PatchedPath = Join-Path $script:CacheDir 'EUV-Music-Library-Generated.ps1'
@@ -74,25 +75,110 @@ function Get-Fnv1Id([string]$Value) {
     return [uint32]$hash
 }
 
-function Get-EventName([string]$RelativePath) {
-    $name = [IO.Path]::GetFileNameWithoutExtension($RelativePath).ToLowerInvariant()
-    $slug = [regex]::Replace($name, '[^a-z0-9]+', '_').Trim('_')
-    if ([string]::IsNullOrWhiteSpace($slug)) { $slug = 'track' }
-    if ($slug.Length -gt 36) { $slug = $slug.Substring(0, 36).TrimEnd('_') }
+function Get-EventName([string]$TrackId) {
+    if ($TrackId -notmatch '^[a-f0-9]{24}$') { throw "Invalid persistent track ID '$TrackId'." }
+    return "MusicPlayer_euvlib_$TrackId"
+}
 
-    $sha1 = [Security.Cryptography.SHA1]::Create()
-    try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes($RelativePath.ToLowerInvariant())
-        $suffix = ([BitConverter]::ToString($sha1.ComputeHash($bytes))).Replace('-', '').Substring(0, 10).ToLowerInvariant()
-    } finally {
-        $sha1.Dispose()
+function ConvertFrom-Id3Text([byte[]]$Payload) {
+    if ($null -eq $Payload -or $Payload.Length -lt 2) { return '' }
+    $encodingByte = $Payload[0]
+    $data = New-Object byte[] ($Payload.Length - 1)
+    [Array]::Copy($Payload, 1, $data, 0, $data.Length)
+    switch ($encodingByte) {
+        0 { $encoding = [Text.Encoding]::GetEncoding(28591) }
+        1 {
+            if ($data.Length -ge 2 -and $data[0] -eq 0xfe -and $data[1] -eq 0xff) {
+                $encoding = [Text.Encoding]::BigEndianUnicode
+            } else {
+                $encoding = [Text.Encoding]::Unicode
+            }
+        }
+        2 { $encoding = [Text.Encoding]::BigEndianUnicode }
+        3 { $encoding = New-Object Text.UTF8Encoding($false) }
+        default { return '' }
     }
-    return "MusicPlayer_euvlib_${slug}_${suffix}"
+    return $encoding.GetString($data).Trim([char]0, [char]0xfeff, [char]0xfffe, ' ')
+}
+
+function Get-SynchsafeInteger([byte[]]$Bytes, [int]$Offset) {
+    return (($Bytes[$Offset] -band 0x7f) -shl 21) -bor (($Bytes[$Offset + 1] -band 0x7f) -shl 14) -bor
+        (($Bytes[$Offset + 2] -band 0x7f) -shl 7) -bor ($Bytes[$Offset + 3] -band 0x7f)
+}
+
+function Read-Mp3Metadata([string]$Path) {
+    $fallbackTitle = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $fallbackArtist = 'Unknown Artist'
+    if ($fallbackTitle -match '^(.+?)\s+-\s+(.+)$') {
+        $fallbackArtist = $Matches[1].Trim()
+        $fallbackTitle = $Matches[2].Trim()
+    }
+    $title = ''
+    $artist = ''
+
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -ge 10) {
+            $reader = New-Object IO.BinaryReader($stream)
+            $header = $reader.ReadBytes(10)
+            if ($header[0] -eq 0x49 -and $header[1] -eq 0x44 -and $header[2] -eq 0x33) {
+                $version = [int]$header[3]
+                $tagSize = Get-SynchsafeInteger $header 6
+                $tagSize = [Math]::Min($tagSize, [Math]::Max(0, $stream.Length - 10))
+                $tag = $reader.ReadBytes($tagSize)
+                $offset = 0
+                while ($offset -lt $tag.Length) {
+                    if ($version -eq 2) {
+                        if ($offset + 6 -gt $tag.Length) { break }
+                        $frameId = [Text.Encoding]::ASCII.GetString($tag, $offset, 3)
+                        $frameSize = (([int]$tag[$offset + 3]) -shl 16) -bor (([int]$tag[$offset + 4]) -shl 8) -bor ([int]$tag[$offset + 5])
+                        $headerSize = 6
+                    } else {
+                        if ($offset + 10 -gt $tag.Length) { break }
+                        $frameId = [Text.Encoding]::ASCII.GetString($tag, $offset, 4)
+                        if ($version -eq 4) {
+                            $frameSize = Get-SynchsafeInteger $tag ($offset + 4)
+                        } else {
+                            $frameSize = (([int]$tag[$offset + 4]) -shl 24) -bor (([int]$tag[$offset + 5]) -shl 16) -bor
+                                (([int]$tag[$offset + 6]) -shl 8) -bor ([int]$tag[$offset + 7])
+                        }
+                        $headerSize = 10
+                    }
+                    if ([string]::IsNullOrWhiteSpace($frameId) -or $frameId[0] -eq [char]0 -or $frameSize -le 0) { break }
+                    if ($offset + $headerSize + $frameSize -gt $tag.Length) { break }
+                    if ($frameId -in @('TIT2', 'TT2', 'TPE1', 'TP1')) {
+                        $payload = New-Object byte[] $frameSize
+                        [Array]::Copy($tag, $offset + $headerSize, $payload, 0, $frameSize)
+                        $value = ConvertFrom-Id3Text $payload
+                        if ($frameId -in @('TIT2', 'TT2')) { $title = $value }
+                        if ($frameId -in @('TPE1', 'TP1')) { $artist = $value }
+                    }
+                    $offset += $headerSize + $frameSize
+                }
+            }
+        }
+
+        if (($title -eq '' -or $artist -eq '') -and $stream.Length -ge 128) {
+            $stream.Seek(-128, [IO.SeekOrigin]::End) | Out-Null
+            $id3v1 = New-Object byte[] 128
+            [void]$stream.Read($id3v1, 0, 128)
+            if ([Text.Encoding]::ASCII.GetString($id3v1, 0, 3) -eq 'TAG') {
+                $latin1 = [Text.Encoding]::GetEncoding(28591)
+                if ($title -eq '') { $title = $latin1.GetString($id3v1, 3, 30).Trim([char]0, ' ') }
+                if ($artist -eq '') { $artist = $latin1.GetString($id3v1, 33, 30).Trim([char]0, ' ') }
+            }
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = $fallbackTitle }
+    if ([string]::IsNullOrWhiteSpace($artist)) { $artist = $fallbackArtist }
+    return [PSCustomObject]@{ Title = $title; Artist = $artist }
 }
 
 function New-DefaultManifest {
     return [ordered]@{
-        version = 1
+        version = 2
         tracks = @()
     }
 }
@@ -126,45 +212,100 @@ function Get-SourceFiles {
 
 function Update-ManifestFromFiles {
     $manifest = Read-Manifest
-    $existing = @{}
+    $existingByPath = @{}
+    $existingByHash = @{}
     foreach ($track in @($manifest.tracks)) {
         if ($null -ne $track.file) {
-            $existing[[string]$track.file.ToLowerInvariant()] = $track
+            $existingByPath[[string]$track.file.ToLowerInvariant()] = $track
+        }
+        if ($null -ne $track.PSObject.Properties['source_sha256'] -and -not [string]::IsNullOrWhiteSpace([string]$track.source_sha256)) {
+            $hash = ([string]$track.source_sha256).ToLowerInvariant()
+            if (-not $existingByHash.ContainsKey($hash)) { $existingByHash[$hash] = @() }
+            $existingByHash[$hash] += $track
+        }
+    }
+
+    $sourceRecords = @()
+    foreach ($file in Get-SourceFiles) {
+        $relative = $file.FullName.Substring($script:TracksDir.Length).TrimStart('\', '/') -replace '\\', '/'
+        $sourceRecords += [PSCustomObject]@{
+            File = $file
+            Relative = $relative
+            Key = $relative.ToLowerInvariant()
+            SourceSha256 = Get-FileSha256 $file.FullName
+        }
+    }
+
+    # Reserve every exact-path identity before content-hash rename matching. Without this
+    # first pass, an earlier duplicate copy could steal the identity of a later exact path.
+    $reservedExactIds = @{}
+    foreach ($record in $sourceRecords) {
+        if ($existingByPath.ContainsKey($record.Key)) {
+            $candidate = $existingByPath[$record.Key]
+            if ($null -ne $candidate.PSObject.Properties['id']) {
+                $reservedExactIds[[string]$candidate.id] = $true
+            }
         }
     }
 
     $updated = @()
     $newCount = 0
-    foreach ($file in Get-SourceFiles) {
-        $relative = $file.FullName.Substring($script:TracksDir.Length).TrimStart('\', '/') -replace '\\', '/'
-        if ($relative.Contains('|')) {
-            Write-Notice "Skipped '$relative': the | character is not supported in track paths."
-            continue
-        }
+    $usedIds = @{}
+    foreach ($record in $sourceRecords) {
+        $file = $record.File
+        $relative = $record.Relative
+        $sourceSha256 = $record.SourceSha256
         $key = $relative.ToLowerInvariant()
-        if ($existing.ContainsKey($key)) {
-            $track = $existing[$key]
+        $track = $null
+        if ($existingByPath.ContainsKey($key)) {
+            $track = $existingByPath[$key]
+        } elseif ($existingByHash.ContainsKey($sourceSha256)) {
+            $track = @($existingByHash[$sourceSha256] | Where-Object {
+                $null -ne $_.PSObject.Properties['id'] -and
+                -not $usedIds.ContainsKey([string]$_.id) -and
+                -not $reservedExactIds.ContainsKey([string]$_.id)
+            } | Select-Object -First 1)
+            if ($track.Count -gt 0) { $track = $track[0] } else { $track = $null }
+        }
+
+        if ($null -ne $track) {
+            $trackId = if ($null -ne $track.PSObject.Properties['id'] -and ([string]$track.id) -match '^[a-f0-9]{24}$') {
+                [string]$track.id
+            } else {
+                [Guid]::NewGuid().ToString('N').Substring(0, 24)
+            }
             $enabled = if ($null -eq $track.PSObject.Properties['enabled']) { $true } else { $track.enabled }
             $mood = if ($null -eq $track.PSObject.Properties['mood'] -or [string]::IsNullOrWhiteSpace([string]$track.mood)) { 'both' } else { [string]$track.mood }
-            $culture = if ($null -eq $track.PSObject.Properties['culture']) { '' } else { [string]$track.culture }
+            $metadata = Read-Mp3Metadata $file.FullName
+            $title = if ($null -eq $track.PSObject.Properties['title'] -or [string]::IsNullOrWhiteSpace([string]$track.title)) { $metadata.Title } else { [string]$track.title }
+            $artist = if ($null -eq $track.PSObject.Properties['artist'] -or [string]::IsNullOrWhiteSpace([string]$track.artist)) { $metadata.Artist } else { [string]$track.artist }
             $updated += [ordered]@{
+                id = $trackId
                 file = $relative
+                title = $title
+                artist = $artist
                 enabled = $enabled
                 mood = $mood
-                culture = $culture
+                source_sha256 = $sourceSha256
             }
         } else {
+            $metadata = Read-Mp3Metadata $file.FullName
+            $trackId = [Guid]::NewGuid().ToString('N').Substring(0, 24)
             $updated += [ordered]@{
+                id = $trackId
                 file = $relative
+                title = $metadata.Title
+                artist = $metadata.Artist
                 enabled = $true
                 mood = 'both'
-                culture = ''
+                source_sha256 = $sourceSha256
             }
             $newCount++
         }
+        $usedIds[$trackId] = $true
     }
 
-    $manifest = [ordered]@{ version = 1; tracks = $updated }
+    $manifest = [ordered]@{ version = 2; tracks = $updated }
     Save-Manifest $manifest
     if ($newCount -gt 0) {
         Write-Success "Added $newCount new track(s) to library.json with mood 'both'."
@@ -189,18 +330,14 @@ function Get-ActiveTracks($Manifest) {
         if ($script:ValidMoods -notcontains $mood) {
             throw "Invalid mood '$mood' for '$relative'. Use both, war, or peace."
         }
-        $culture = if ($null -eq $track.PSObject.Properties['culture']) { '' } else { ([string]$track.culture).ToLowerInvariant() }
-        if ($script:ValidCultures -notcontains $culture) {
-            throw "Invalid culture '$culture' for '$relative'. See README.md for supported values."
-        }
-
         $fullPath = Join-Path $script:TracksDir ($relative -replace '/', '\')
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
             Write-Notice "Skipping missing file: $relative"
             continue
         }
 
-        $eventName = Get-EventName $relative
+        $trackId = if ($null -eq $track.PSObject.Properties['id']) { '' } else { [string]$track.id }
+        $eventName = Get-EventName $trackId
         if ($seenEvents.ContainsKey($eventName)) {
             throw "Two tracks generated the same event name: '$relative' and '$($seenEvents[$eventName])'."
         }
@@ -214,10 +351,14 @@ function Get-ActiveTracks($Manifest) {
         $active += [PSCustomObject]@{
             File = $relative
             SourcePath = $fullPath
-            SourceSha256 = Get-FileSha256 $fullPath
+            SourceSha256 = [string]$track.source_sha256
+            TrackId = $trackId
             EventName = $eventName
+            EventId = Get-Fnv1Id $eventName
+            Title = if ($null -eq $track.PSObject.Properties['title']) { [IO.Path]::GetFileNameWithoutExtension($relative) } else { [string]$track.title }
+            Artist = if ($null -eq $track.PSObject.Properties['artist']) { 'Unknown Artist' } else { [string]$track.artist }
             Mood = $upstreamMood
-            Culture = $culture
+            Culture = ''
             WemId = $wemId
         }
     }
@@ -365,6 +506,19 @@ function Write-SoundbanksInfo([object[]]$Tracks) {
                     Language = 'SFX'
                     ShortName = 'eu4_soundtrack_music'
                     Path = 'eu4_soundtrack_music.bnk'
+                    Events = @($Tracks | ForEach-Object {
+                        $duration = Get-WemDurationSeconds (Join-Path $script:MediaDir "$($_.WemId).wem")
+                        $durationText = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:F5}', $duration)
+                        [ordered]@{
+                            Id = [string]$_.EventId
+                            Name = $_.EventName
+                            GUID = ('{{00000000-0000-0000-0000-{0:000000000000}}}' -f ([uint64]$_.EventId % 1000000000000))
+                            DurationType = 'OneShot'
+                            DurationMin = $durationText
+                            DurationMax = $durationText
+                            MediaRefs = @([ordered]@{ Id = [string]$_.WemId })
+                        }
+                    })
                     Media = @($media)
                 },
                 [ordered]@{
@@ -382,6 +536,55 @@ function Write-SoundbanksInfo([object[]]$Tracks) {
     [IO.File]::WriteAllText($path, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Get-WemDurationSeconds([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $length = [Math]::Min([int64]65536, $stream.Length)
+        $header = New-Object byte[] ([int]$length)
+        [void]$stream.Read($header, 0, $header.Length)
+    } finally {
+        $stream.Dispose()
+    }
+    $position = 12
+    while ($position + 8 -le $header.Length) {
+        $chunkSize = [BitConverter]::ToUInt32($header, $position + 4)
+        if ($header[$position] -eq 0x66 -and $header[$position + 1] -eq 0x6d -and
+            $header[$position + 2] -eq 0x74 -and $header[$position + 3] -eq 0x20) {
+            if ($position + 36 -gt $header.Length) { break }
+            $sampleRate = [BitConverter]::ToUInt32($header, $position + 12)
+            $frames = [BitConverter]::ToUInt32($header, $position + 32)
+            if ($sampleRate -gt 0) { return [Math]::Max(0.001, [double]$frames / [double]$sampleRate) }
+            break
+        }
+        $position += 8 + [int]$chunkSize
+        if (($chunkSize % 2) -ne 0) { $position++ }
+    }
+    throw "Could not read duration from converted media: $Path"
+}
+
+function ConvertTo-Eu5LocalizedString([string]$Value) {
+    return $Value.Replace('\', '\\').Replace('"', '\"').Replace("`r", ' ').Replace("`n", ' ')
+}
+
+function Write-MusicPlayerRegistration([object[]]$Tracks) {
+    Ensure-Directory (Split-Path $script:TrackDefinitionPath -Parent)
+    Ensure-Directory (Split-Path $script:LocalizationPath -Parent)
+
+    $definitions = "# Generated by EUV Music Library Tool.`r`n`r`n"
+    $localization = "l_english:`r`n`r`n"
+    foreach ($track in ($Tracks | Sort-Object EventName)) {
+        $artistKey = "$($track.EventName)_artist"
+        $definitions += "$($track.EventName) = {`r`n`tcomposer = $artistKey`r`n`tperformer = $artistKey`r`n}`r`n`r`n"
+        $title = ConvertTo-Eu5LocalizedString $track.Title
+        $artist = ConvertTo-Eu5LocalizedString $track.Artist
+        $localization += " $($track.EventName): `"$title`"`r`n"
+        $localization += " ${artistKey}: `"$artist`"`r`n"
+    }
+    $utf8Bom = New-Object Text.UTF8Encoding($true)
+    [IO.File]::WriteAllText($script:TrackDefinitionPath, $definitions, $utf8Bom)
+    [IO.File]::WriteAllText($script:LocalizationPath, $localization, $utf8Bom)
+}
+
 function Get-ValidatedWemId([object]$Value) {
     $text = [string]$Value
     [uint32]$parsed = 0
@@ -392,17 +595,22 @@ function Get-ValidatedWemId([object]$Value) {
 function Restore-SyncBackup {
     if (-not (Test-Path -LiteralPath $script:BackupDir -PathType Container)) { return }
     $transactionPath = Join-Path $script:BackupDir 'transaction.json'
+    if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $script:BackupDir -Recurse -Force
+        return
+    }
     $mutableIds = @()
-    if (Test-Path -LiteralPath $transactionPath -PathType Leaf) {
-        try {
-            $transaction = Get-Content -LiteralPath $transactionPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            foreach ($value in @($transaction.mutable_wem_ids)) {
-                $id = Get-ValidatedWemId $value
-                if ($null -ne $id) { $mutableIds += $id }
-            }
-        } catch {
-            Write-Notice 'The interrupted-sync record was unreadable; restoring the known bank files and media backup.'
+    try {
+        $transaction = Get-Content -LiteralPath $transactionPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($transaction.initialized -ne $true) { throw 'Transaction was not initialized.' }
+        foreach ($value in @($transaction.mutable_wem_ids)) {
+            $id = Get-ValidatedWemId $value
+            if ($null -ne $id) { $mutableIds += $id }
         }
+    } catch {
+        Remove-Item -LiteralPath $script:BackupDir -Recurse -Force
+        Write-Notice 'Discarded an incomplete sync snapshot without changing the installed mod.'
+        return
     }
 
     foreach ($id in $mutableIds) {
@@ -418,11 +626,21 @@ function Restore-SyncBackup {
             }
         }
     }
-    foreach ($name in @('eu4_soundtrack_music.bnk', 'eu4_soundtrack_media.bnk', 'SoundbanksInfo.json')) {
-        $live = Join-Path $script:BanksDir $name
-        $backup = Join-Path $script:BackupDir $name
+    foreach ($pair in @(
+        @((Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk'), (Join-Path $script:BackupDir 'eu4_soundtrack_music.bnk')),
+        @((Join-Path $script:BanksDir 'eu4_soundtrack_media.bnk'), (Join-Path $script:BackupDir 'eu4_soundtrack_media.bnk')),
+        @((Join-Path $script:BanksDir 'SoundbanksInfo.json'), (Join-Path $script:BackupDir 'SoundbanksInfo.json')),
+        @($script:TrackDefinitionPath, (Join-Path $script:BackupDir 'music_player_tracks.txt')),
+        @($script:LocalizationPath, (Join-Path $script:BackupDir 'localization.yml')),
+        @($script:StatePath, (Join-Path $script:BackupDir 'generated-state.json'))
+    )) {
+        $live = $pair[0]
+        $backup = $pair[1]
         if (Test-Path -LiteralPath $live -PathType Leaf) { Remove-Item -LiteralPath $live -Force }
-        if (Test-Path -LiteralPath $backup -PathType Leaf) { Copy-Item -LiteralPath $backup -Destination $live -Force }
+        if (Test-Path -LiteralPath $backup -PathType Leaf) {
+            Ensure-Directory (Split-Path $live -Parent)
+            Copy-Item -LiteralPath $backup -Destination $live -Force
+        }
     }
     Remove-Item -LiteralPath $script:BackupDir -Recurse -Force
     Write-Notice 'Restored the previously working generated soundtrack after an interrupted or failed sync.'
@@ -434,10 +652,16 @@ function Start-OutputTransaction([object[]]$Tracks) {
     $backupMedia = Join-Path $script:BackupDir 'Media'
     Ensure-Directory $backupMedia
 
-    foreach ($name in @('eu4_soundtrack_music.bnk', 'eu4_soundtrack_media.bnk', 'SoundbanksInfo.json')) {
-        $live = Join-Path $script:BanksDir $name
-        if (Test-Path -LiteralPath $live -PathType Leaf) {
-            Copy-Item -LiteralPath $live -Destination (Join-Path $script:BackupDir $name) -Force
+    foreach ($pair in @(
+        @((Join-Path $script:BanksDir 'eu4_soundtrack_music.bnk'), (Join-Path $script:BackupDir 'eu4_soundtrack_music.bnk')),
+        @((Join-Path $script:BanksDir 'eu4_soundtrack_media.bnk'), (Join-Path $script:BackupDir 'eu4_soundtrack_media.bnk')),
+        @((Join-Path $script:BanksDir 'SoundbanksInfo.json'), (Join-Path $script:BackupDir 'SoundbanksInfo.json')),
+        @($script:TrackDefinitionPath, (Join-Path $script:BackupDir 'music_player_tracks.txt')),
+        @($script:LocalizationPath, (Join-Path $script:BackupDir 'localization.yml')),
+        @($script:StatePath, (Join-Path $script:BackupDir 'generated-state.json'))
+    )) {
+        if (Test-Path -LiteralPath $pair[0] -PathType Leaf) {
+            Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
         }
     }
 
@@ -469,6 +693,7 @@ function Start-OutputTransaction([object[]]$Tracks) {
     }
 
     $mutableIds = @()
+    $affectedExistingIds = @()
     foreach ($track in $Tracks) {
         $id = [string]$track.WemId
         $needsConversion = -not $stateReliable -or -not $oldTracks.ContainsKey($id) -or
@@ -477,7 +702,7 @@ function Start-OutputTransaction([object[]]$Tracks) {
         if ($needsConversion -or -not (Test-Path -LiteralPath $live -PathType Leaf)) {
             $mutableIds += $id
             if (Test-Path -LiteralPath $live -PathType Leaf) {
-                Move-Item -LiteralPath $live -Destination (Join-Path $backupMedia "$id.wem") -Force
+                $affectedExistingIds += $id
                 Write-Notice "Rebuilding converted media for $($track.File)"
             }
         }
@@ -486,14 +711,35 @@ function Start-OutputTransaction([object[]]$Tracks) {
         if (-not $currentIds.ContainsKey($id)) {
             $live = Join-Path $script:MediaDir "$id.wem"
             if (Test-Path -LiteralPath $live -PathType Leaf) {
-                Move-Item -LiteralPath $live -Destination (Join-Path $backupMedia "$id.wem") -Force
+                $affectedExistingIds += $id
+            }
+        }
+    }
+    if (-not $stateReliable -and (Test-Path -LiteralPath $script:MediaDir -PathType Container)) {
+        foreach ($file in Get-ChildItem -LiteralPath $script:MediaDir -File -Filter '*.wem') {
+            $id = Get-ValidatedWemId $file.BaseName
+            if ($null -ne $id -and $affectedExistingIds -notcontains $id -and -not $currentIds.ContainsKey($id)) {
+                $affectedExistingIds += $id
             }
         }
     }
 
-    $transaction = [ordered]@{ mutable_wem_ids = @($mutableIds) }
+    foreach ($id in $affectedExistingIds) {
+        $live = Join-Path $script:MediaDir "$id.wem"
+        Copy-Item -LiteralPath $live -Destination (Join-Path $backupMedia "$id.wem") -Force
+    }
+
+    $transaction = [ordered]@{ initialized = $true; mutable_wem_ids = @($mutableIds) }
     $json = $transaction | ConvertTo-Json -Depth 3
-    [IO.File]::WriteAllText((Join-Path $script:BackupDir 'transaction.json'), $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    $transactionTemporary = Join-Path $script:BackupDir 'transaction.json.tmp'
+    $transactionPath = Join-Path $script:BackupDir 'transaction.json'
+    [IO.File]::WriteAllText($transactionTemporary, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $transactionTemporary -Destination $transactionPath -Force
+
+    foreach ($id in $affectedExistingIds) {
+        $live = Join-Path $script:MediaDir "$id.wem"
+        if (Test-Path -LiteralPath $live -PathType Leaf) { Remove-Item -LiteralPath $live -Force }
+    }
 }
 
 function Complete-OutputTransaction {
@@ -505,12 +751,106 @@ function Complete-OutputTransaction {
 function Test-WemFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     try {
-        $bytes = [IO.File]::ReadAllBytes($Path)
-        return $bytes.Length -gt 22 -and $bytes[0] -eq 0x52 -and $bytes[1] -eq 0x49 -and
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            if ($stream.Length -le 22) { return $false }
+            $bytes = New-Object byte[] 22
+            if ($stream.Read($bytes, 0, 22) -ne 22) { return $false }
+        } finally {
+            $stream.Dispose()
+        }
+        return $bytes[0] -eq 0x52 -and $bytes[1] -eq 0x49 -and
             $bytes[2] -eq 0x46 -and $bytes[3] -eq 0x46 -and $bytes[20] -eq 0xff -and $bytes[21] -eq 0xff
     } catch {
         return $false
     }
+}
+
+function New-RiffChunk([string]$Id, [byte[]]$Body) {
+    $stream = New-Object IO.MemoryStream
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes($Id))
+        $writer.Write([uint32]$Body.Length)
+        $writer.Write($Body)
+        if (($Body.Length % 2) -ne 0) { $writer.Write([byte]0) }
+        return ,$stream.ToArray()
+    } finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Add-WemEventLabel([string]$Path, [string]$EventName) {
+    $source = [IO.File]::ReadAllBytes($Path)
+    if ($source.Length -lt 24 -or [Text.Encoding]::ASCII.GetString($source, 0, 4) -ne 'RIFF' -or
+        [Text.Encoding]::ASCII.GetString($source, 8, 4) -ne 'WAVE') {
+        throw "Cannot label an invalid WEM file: $Path"
+    }
+
+    $preservedChunks = New-Object 'Collections.Generic.List[byte[]]'
+    $dataChunk = $null
+    $position = 12
+    while ($position + 8 -le $source.Length) {
+        $id = [Text.Encoding]::ASCII.GetString($source, $position, 4)
+        $size = [BitConverter]::ToUInt32($source, $position + 4)
+        $total = 8 + [int64]$size + ($size % 2)
+        if ($position + $total -gt $source.Length) { throw "Malformed RIFF chunk in $Path" }
+        $raw = New-Object byte[] ([int]$total)
+        [Array]::Copy($source, $position, $raw, 0, $raw.Length)
+        if ($id -eq 'data') {
+            $dataChunk = $raw
+        } elseif ($id -notin @('cue ', 'LIST')) {
+            $preservedChunks.Add($raw)
+        }
+        $position += [int]$total
+    }
+    if ($null -eq $dataChunk) { throw "WEM data chunk was not found: $Path" }
+
+    $cueBody = New-Object byte[] 28
+    [BitConverter]::GetBytes([uint32]1).CopyTo($cueBody, 0)
+    [Text.Encoding]::ASCII.GetBytes('data').CopyTo($cueBody, 12)
+    $cueChunk = New-RiffChunk 'cue ' $cueBody
+
+    $nameBytes = [Text.Encoding]::ASCII.GetBytes($EventName)
+    $labelBody = New-Object byte[] (4 + $nameBytes.Length + 1)
+    [Array]::Copy($nameBytes, 0, $labelBody, 4, $nameBytes.Length)
+    $labelChunk = New-RiffChunk 'labl' $labelBody
+    $listBody = New-Object byte[] (4 + $labelChunk.Length)
+    [Text.Encoding]::ASCII.GetBytes('adtl').CopyTo($listBody, 0)
+    [Array]::Copy($labelChunk, 0, $listBody, 4, $labelChunk.Length)
+    $listChunk = New-RiffChunk 'LIST' $listBody
+
+    $outputStream = New-Object IO.MemoryStream
+    $writer = New-Object IO.BinaryWriter($outputStream)
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'))
+        $writer.Write([uint32]0)
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVE'))
+        foreach ($chunk in $preservedChunks) { $writer.Write($chunk) }
+        $writer.Write($cueChunk)
+        $writer.Write($listChunk)
+        $writer.Write($dataChunk)
+        $output = $outputStream.ToArray()
+    } finally {
+        $writer.Dispose()
+        $outputStream.Dispose()
+    }
+    [BitConverter]::GetBytes([uint32]($output.Length - 8)).CopyTo($output, 4)
+
+    $same = $source.Length -eq $output.Length
+    if ($same) {
+        for ($index = 0; $index -lt $source.Length; $index++) {
+            if ($source[$index] -ne $output[$index]) { $same = $false; break }
+        }
+    }
+    if (-not $same) {
+        $temporary = "$Path.labeling"
+        [IO.File]::WriteAllBytes($temporary, $output)
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+        return $true
+    }
+    return $false
 }
 
 function Clear-GeneratedMod {
@@ -538,6 +878,9 @@ function Clear-GeneratedMod {
             Remove-Item -LiteralPath $path -Force
         }
     }
+    foreach ($path in @($script:TrackDefinitionPath, $script:LocalizationPath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+    }
     if (Test-Path -LiteralPath $script:StatePath -PathType Leaf) {
         Remove-Item -LiteralPath $script:StatePath -Force
     }
@@ -559,6 +902,28 @@ function Save-GeneratedState([object[]]$Tracks) {
     [IO.File]::WriteAllText($script:StatePath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Invoke-GeneratedConverter([string]$ConverterPath) {
+    $oldModDir = $env:EUV_MUSIC_MOD_DIR
+    $oldSourceDir = $env:EUV_MUSIC_SOURCE_DIR
+    try {
+        $env:EUV_MUSIC_MOD_DIR = $script:ModDir
+        $env:EUV_MUSIC_SOURCE_DIR = $script:TracksDir
+        $converterOutput = @()
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $ConverterPath 2>&1 |
+            Tee-Object -Variable converterOutput | ForEach-Object { Write-Host $_ }
+        $converterExitCode = $LASTEXITCODE
+        if ($converterExitCode -ne 0) {
+            throw "The audio converter exited with code $converterExitCode."
+        }
+        if (($converterOutput | Out-String) -match '(?im)^\[X\].*(failed|error)|Sound bank build failed') {
+            throw 'The converter reported a sound-bank error. The library was not marked as synced.'
+        }
+    } finally {
+        $env:EUV_MUSIC_MOD_DIR = $oldModDir
+        $env:EUV_MUSIC_SOURCE_DIR = $oldSourceDir
+    }
+}
+
 function Sync-Library {
     Write-Heading 'Syncing EUV Music Library'
     Install-LocalMod
@@ -574,32 +939,24 @@ function Sync-Library {
 
     Write-Host "Preparing $($tracks.Count) track(s)..."
     $converter = New-PatchedConverter $tracks
-    Start-OutputTransaction $tracks
     try {
-        $oldModDir = $env:EUV_MUSIC_MOD_DIR
-        $oldSourceDir = $env:EUV_MUSIC_SOURCE_DIR
-        try {
-            $env:EUV_MUSIC_MOD_DIR = $script:ModDir
-            $env:EUV_MUSIC_SOURCE_DIR = $script:TracksDir
-            $converterOutput = @()
-            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $converter 2>&1 |
-                Tee-Object -Variable converterOutput | ForEach-Object { Write-Host $_ }
-            $converterExitCode = $LASTEXITCODE
-            if ($converterExitCode -ne 0) {
-                throw "The audio converter exited with code $converterExitCode."
-            }
-            if (($converterOutput | Out-String) -match '(?im)^\[X\].*(failed|error)|Sound bank build failed') {
-                throw 'The converter reported a sound-bank error. The library was not marked as synced.'
-            }
-        } finally {
-            $env:EUV_MUSIC_MOD_DIR = $oldModDir
-            $env:EUV_MUSIC_SOURCE_DIR = $oldSourceDir
-        }
+        Start-OutputTransaction $tracks
+        Invoke-GeneratedConverter $converter
 
         $missingWems = @($tracks | Where-Object { -not (Test-WemFile (Join-Path $script:MediaDir "$($_.WemId).wem")) })
         if ($missingWems.Count -gt 0) {
             $missingNames = ($missingWems | ForEach-Object { $_.File }) -join ', '
             throw "Conversion did not produce valid EU5 media for: $missingNames"
+        }
+        $labelsChanged = $false
+        foreach ($track in $tracks) {
+            if (Add-WemEventLabel (Join-Path $script:MediaDir "$($track.WemId).wem") $track.EventName) {
+                $labelsChanged = $true
+            }
+        }
+        if ($labelsChanged) {
+            Write-Host 'Updating sound-bank prefetch data for Music Player labels...'
+            Invoke-GeneratedConverter $converter
         }
         foreach ($bankName in @('eu4_soundtrack_music.bnk', 'eu4_soundtrack_media.bnk')) {
             $bankPath = Join-Path $script:BanksDir $bankName
@@ -608,6 +965,7 @@ function Sync-Library {
             }
         }
         Write-SoundbanksInfo $tracks
+        Write-MusicPlayerRegistration $tracks
         Save-GeneratedState $tracks
         Complete-OutputTransaction
     } catch {
@@ -625,45 +983,263 @@ function Open-LibraryFolder {
     Start-Process explorer.exe -ArgumentList ('"{0}"' -f $script:TracksDir)
 }
 
-function Edit-ManifestFile {
+function Show-MusicLibraryWindow {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    [Windows.Forms.Application]::EnableVisualStyles()
+
     Install-LocalMod
-    Update-ManifestFromFiles | Out-Null
-    Start-Process notepad.exe -ArgumentList ('"{0}"' -f $script:ManifestPath)
-}
+    $form = New-Object Windows.Forms.Form
+    $form.Text = $script:ToolName
+    $form.StartPosition = 'CenterScreen'
+    $form.ClientSize = New-Object Drawing.Size(940, 570)
+    $form.MinimumSize = New-Object Drawing.Size(760, 480)
 
-function Launch-Eu5 {
-    Start-Process 'steam://rungameid/3450310'
-}
+    $intro = New-Object Windows.Forms.Label
+    $intro.Text = 'Add MP3 files, review their title and artist, choose when they play, then convert and implement.'
+    $intro.AutoSize = $true
+    $intro.Location = New-Object Drawing.Point(16, 16)
+    $form.Controls.Add($intro)
 
-function Show-Menu {
-    while ($true) {
-        Write-Heading $script:ToolName
-        Write-Host '1. Sync library'
-        Write-Host '2. Sync and launch EU5'
-        Write-Host '3. Open music folder'
-        Write-Host '4. Edit track assignments'
-        Write-Host '5. Exit'
-        Write-Host ''
-        $choice = Read-Host 'Choose an option'
-        switch ($choice) {
-            '1' { [void](Sync-Library); Read-Host 'Press Enter to return to the menu' | Out-Null }
-            '2' { if (Sync-Library) { Launch-Eu5 }; return }
-            '3' { Open-LibraryFolder }
-            '4' { Edit-ManifestFile }
-            '5' { return }
-            default { Write-Notice 'Enter a number from 1 to 5.' }
+    $openButton = New-Object Windows.Forms.Button
+    $openButton.Text = 'Open Music Folder'
+    $openButton.Size = New-Object Drawing.Size(145, 32)
+    $openButton.Location = New-Object Drawing.Point(16, 46)
+    $form.Controls.Add($openButton)
+
+    $refreshButton = New-Object Windows.Forms.Button
+    $refreshButton.Text = 'Refresh'
+    $refreshButton.Size = New-Object Drawing.Size(90, 32)
+    $refreshButton.Location = New-Object Drawing.Point(170, 46)
+    $form.Controls.Add($refreshButton)
+
+    $removeButton = New-Object Windows.Forms.Button
+    $removeButton.Text = 'Remove Song'
+    $removeButton.Size = New-Object Drawing.Size(110, 32)
+    $removeButton.Location = New-Object Drawing.Point(269, 46)
+    $form.Controls.Add($removeButton)
+
+    $grid = New-Object Windows.Forms.DataGridView
+    $grid.Location = New-Object Drawing.Point(16, 90)
+    $grid.Size = New-Object Drawing.Size(908, 390)
+    $grid.Anchor = 'Top,Bottom,Left,Right'
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.AllowUserToResizeRows = $false
+    $grid.AutoGenerateColumns = $false
+    $grid.BackgroundColor = [Drawing.SystemColors]::Window
+    $grid.BorderStyle = 'Fixed3D'
+    $grid.MultiSelect = $true
+    $grid.SelectionMode = 'FullRowSelect'
+    $grid.RowHeadersVisible = $false
+
+    $idColumn = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $idColumn.Name = 'TrackId'
+    $idColumn.Visible = $false
+    [void]$grid.Columns.Add($idColumn)
+
+    $titleColumn = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $titleColumn.Name = 'Title'
+    $titleColumn.HeaderText = 'Title'
+    $titleColumn.Width = 245
+    [void]$grid.Columns.Add($titleColumn)
+
+    $artistColumn = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $artistColumn.Name = 'Artist'
+    $artistColumn.HeaderText = 'Artist'
+    $artistColumn.Width = 200
+    [void]$grid.Columns.Add($artistColumn)
+
+    $assignmentColumn = New-Object Windows.Forms.DataGridViewComboBoxColumn
+    $assignmentColumn.Name = 'Assignment'
+    $assignmentColumn.HeaderText = 'Playback'
+    $assignmentColumn.Width = 105
+    [void]$assignmentColumn.Items.AddRange([object[]]@('Both', 'War', 'Peace'))
+    [void]$grid.Columns.Add($assignmentColumn)
+
+    $fileColumn = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $fileColumn.Name = 'File'
+    $fileColumn.HeaderText = 'Managed MP3'
+    $fileColumn.ReadOnly = $true
+    $fileColumn.AutoSizeMode = 'Fill'
+    [void]$grid.Columns.Add($fileColumn)
+    $form.Controls.Add($grid)
+
+    $statusLabel = New-Object Windows.Forms.Label
+    $statusLabel.Text = 'Ready.'
+    $statusLabel.AutoSize = $true
+    $statusLabel.Location = New-Object Drawing.Point(16, 498)
+    $statusLabel.Anchor = 'Bottom,Left'
+    $form.Controls.Add($statusLabel)
+
+    $progress = New-Object Windows.Forms.ProgressBar
+    $progress.Location = New-Object Drawing.Point(16, 525)
+    $progress.Size = New-Object Drawing.Size(610, 22)
+    $progress.Anchor = 'Bottom,Left,Right'
+    $form.Controls.Add($progress)
+
+    $implementButton = New-Object Windows.Forms.Button
+    $implementButton.Text = 'Convert and Implement'
+    $implementButton.Size = New-Object Drawing.Size(180, 38)
+    $implementButton.Location = New-Object Drawing.Point(744, 512)
+    $implementButton.Anchor = 'Bottom,Right'
+    $form.Controls.Add($implementButton)
+
+    $pollTimer = New-Object Windows.Forms.Timer
+    $pollTimer.Interval = 250
+
+    $loadGrid = {
+        $manifest = Update-ManifestFromFiles
+        $grid.Rows.Clear()
+        foreach ($track in @($manifest.tracks)) {
+            $rowIndex = $grid.Rows.Add()
+            $row = $grid.Rows[$rowIndex]
+            $row.Cells['TrackId'].Value = [string]$track.id
+            $row.Cells['Title'].Value = [string]$track.title
+            $row.Cells['Artist'].Value = [string]$track.artist
+            $row.Cells['Assignment'].Value = (Get-Culture).TextInfo.ToTitleCase(([string]$track.mood).ToLowerInvariant())
+            $row.Cells['File'].Value = [string]$track.file
         }
+        $statusLabel.Text = "$($grid.Rows.Count) MP3 file(s) detected."
+        if ($null -eq $form.Tag) { $implementButton.Enabled = $grid.Rows.Count -gt 0 }
     }
+
+    $saveGrid = {
+        [void]$grid.EndEdit()
+        $manifest = Read-Manifest
+        $byId = @{}
+        foreach ($track in @($manifest.tracks)) { $byId[[string]$track.id] = $track }
+        foreach ($row in $grid.Rows) {
+            $id = [string]$row.Cells['TrackId'].Value
+            if (-not $byId.ContainsKey($id)) { continue }
+            $title = [string]$row.Cells['Title'].Value
+            $artist = [string]$row.Cells['Artist'].Value
+            if ([string]::IsNullOrWhiteSpace($title)) { throw "Title cannot be empty for $($row.Cells['File'].Value)." }
+            if ([string]::IsNullOrWhiteSpace($artist)) { $artist = 'Unknown Artist' }
+            $assignment = ([string]$row.Cells['Assignment'].Value).ToLowerInvariant()
+            if ($script:ValidMoods -notcontains $assignment) { throw "Choose War, Peace, or Both for '$title'." }
+            $byId[$id].title = $title.Trim()
+            $byId[$id].artist = $artist.Trim()
+            $byId[$id].mood = $assignment
+        }
+        Save-Manifest $manifest
+    }
+
+    $openButton.Add_Click({ Open-LibraryFolder })
+    $refreshButton.Add_Click({
+        try { & $saveGrid; & $loadGrid } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null }
+    })
+    $removeButton.Add_Click({
+        if ($grid.SelectedRows.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('Select one or more songs first.', $script:ToolName, 'OK', 'Information') | Out-Null
+            return
+        }
+        $answer = [Windows.Forms.MessageBox]::Show(
+            'Remove the selected managed MP3 files? They will be sent to the Recycle Bin. Your originals elsewhere are not affected.',
+            $script:ToolName, 'YesNo', 'Warning')
+        if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+        try {
+            & $saveGrid
+            foreach ($row in $grid.SelectedRows) {
+                $relative = [string]$row.Cells['File'].Value
+                $path = Join-Path $script:TracksDir ($relative -replace '/', '\')
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                        $path,
+                        [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+                        [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                }
+            }
+            & $loadGrid
+        } catch {
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null
+        }
+    })
+    $implementButton.Add_Click({
+        try {
+            & $saveGrid
+            $form.UseWaitCursor = $true
+            $implementButton.Enabled = $false
+            $openButton.Enabled = $false
+            $refreshButton.Enabled = $false
+            $removeButton.Enabled = $false
+            $progress.Style = 'Marquee'
+            $statusLabel.Text = 'Converting and rebuilding the EU5 local mod...'
+            [Windows.Forms.Application]::DoEvents()
+            $form.Tag = Start-Job -ScriptBlock {
+                param($ToolScript, $UserDirectory)
+                $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $ToolScript `
+                    -Action Sync -Eu5UserDir $UserDirectory 2>&1)
+                if ($LASTEXITCODE -ne 0) { throw (($output | Out-String).Trim()) }
+                return $output
+            } -ArgumentList $PSCommandPath, $script:Eu5UserDir
+            $pollTimer.Start()
+        } catch {
+            $statusLabel.Text = 'Implementation failed; the previous working mod was restored.'
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null
+            $progress.Style = 'Blocks'
+            $implementButton.Enabled = $true
+            $openButton.Enabled = $true
+            $refreshButton.Enabled = $true
+            $removeButton.Enabled = $true
+            $form.UseWaitCursor = $false
+        }
+    })
+
+    $pollTimer.Add_Tick({
+        $job = $form.Tag
+        if ($null -eq $job -or $job.State -notin @('Completed', 'Failed', 'Stopped')) { return }
+        $pollTimer.Stop()
+        $jobState = $job.State
+        $reason = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0].JobStateInfo.Reason } else { $null }
+        $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+        Remove-Job -Job $job -Force
+        $form.Tag = $null
+        $progress.Style = 'Blocks'
+        $implementButton.Enabled = $true
+        $openButton.Enabled = $true
+        $refreshButton.Enabled = $true
+        $removeButton.Enabled = $true
+        $form.UseWaitCursor = $false
+
+        if ($jobState -eq 'Completed') {
+            & $loadGrid
+            $statusLabel.Text = 'Implementation complete. Launch EU5 normally through Steam.'
+            [Windows.Forms.MessageBox]::Show(
+                'Music was implemented successfully. Enable EUV Music Library in EU5 once, then launch the game normally through Steam.',
+                $script:ToolName, 'OK', 'Information') | Out-Null
+        } else {
+            $message = if ($null -ne $reason -and -not [string]::IsNullOrWhiteSpace($reason.Message)) {
+                $reason.Message
+            } else {
+                ($output | Out-String).Trim()
+            }
+            if ([string]::IsNullOrWhiteSpace($message)) { $message = 'Conversion failed. See the console output for details.' }
+            if ($message.Length -gt 3000) { $message = $message.Substring($message.Length - 3000) }
+            $statusLabel.Text = 'Implementation failed; the previous working mod was restored.'
+            [Windows.Forms.MessageBox]::Show($message, $script:ToolName, 'OK', 'Error') | Out-Null
+        }
+    })
+
+    $form.Add_FormClosing({
+        param($closingSender, $closingEventArgs)
+        if ($null -ne $form.Tag -and $form.Tag.State -in @('Running', 'NotStarted')) {
+            $closingEventArgs.Cancel = $true
+            [Windows.Forms.MessageBox]::Show('Wait for conversion to finish before closing the utility.', $script:ToolName, 'OK', 'Information') | Out-Null
+        }
+    })
+
+    & $loadGrid
+    [void]$form.ShowDialog()
 }
 
 try {
     switch ($Action) {
-        'Menu' { Show-Menu }
+        'Menu' { Show-MusicLibraryWindow }
         'Install' { Install-LocalMod }
         'Sync' { [void](Sync-Library) }
-        'SyncAndLaunch' { if (Sync-Library) { Launch-Eu5 } }
         'OpenLibrary' { Open-LibraryFolder }
-        'EditManifest' { Edit-ManifestFile }
     }
 } catch {
     Write-Host ''
