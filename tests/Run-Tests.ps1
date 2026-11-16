@@ -13,6 +13,33 @@ function Assert-True([bool]$Condition, [string]$Message) {
 try {
     . $scriptPath -Action Install -Eu5UserDir $testRoot
 
+    $steam = Join-Path $testRoot 'Steam'
+    $library = Join-Path $testRoot 'Second Library'
+    $apps = Join-Path $library 'steamapps'
+    $bank = Join-Path $apps 'common\Custom EU5\game\loading_screen\sound\banks\windows\sb_music_logic.bnk'
+    Ensure-Directory (Split-Path $bank)
+    Ensure-Directory (Join-Path $steam 'steamapps')
+    [IO.File]::WriteAllText((Join-Path $steam 'steamapps\libraryfolders.vdf'), ('"path" "' + $library.Replace('\', '\\') + '"'))
+    [IO.File]::WriteAllText((Join-Path $apps 'appmanifest_3450310.acf'), '"installdir" "Custom EU5"')
+    [IO.File]::WriteAllBytes($bank, [byte[]]@(0))
+    Assert-True ((Find-GameBank @($steam)) -eq $bank) 'Steam library and custom install directory should resolve the game bank'
+    Remove-Item -LiteralPath $bank
+    $missingMessage = ''
+    try { Find-GameBank @($steam) } catch { $missingMessage = $_.Exception.Message }
+    Assert-True ($missingMessage -like '*Verify integrity*') 'missing game files should produce Steam repair instructions'
+
+    $sample = Join-Path $testRoot 'sample.mp3'
+    [IO.File]::WriteAllBytes($sample, [byte[]]@(1))
+    Assert-True (Import-LibraryMp3 $sample) 'first import should copy audio'
+    Assert-True (-not (Import-LibraryMp3 $sample)) 'repeat import should skip identical audio'
+    [IO.File]::WriteAllBytes($sample, [byte[]]@(2))
+    Assert-True (Import-LibraryMp3 $sample) 'a filename collision should preserve both recordings'
+    $firstCopy = Join-Path $script:TracksDir 'sample.mp3'
+    $secondCopy = Join-Path $script:TracksDir 'sample (2).mp3'
+    Assert-True (([IO.File]::ReadAllBytes($firstCopy))[0] -eq 1) 'original library copy should remain intact'
+    Assert-True (([IO.File]::ReadAllBytes($secondCopy))[0] -eq 2) 'numbered copy should contain new audio'
+    Remove-Item -LiteralPath $firstCopy, $secondCopy
+
     $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if (-not $ffmpeg) { $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue }
     if (-not $ffmpeg) { throw 'FFmpeg is required to generate the MP3 metadata test fixture.' }
