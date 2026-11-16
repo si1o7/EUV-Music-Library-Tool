@@ -1,40 +1,29 @@
 # EUV Music Library Tool
 
-Add MP3 songs to the Europa Universalis V Music Player and the war and peace playlists. Requires Windows 11, the Steam edition of EU5, and internet access for first-time setup.
+A Windows utility for importing MP3 files into Europa Universalis V as a local music mod. Imported tracks appear in the Music Player and can be assigned to the war playlist, the peace playlist, or both.
 
-## Quick start
+## Requirements
 
-### Songs already in the music folder
+- Windows 11 with Windows PowerShell 5.1
+- Europa Universalis V installed through Steam
+- FFmpeg for audio conversion
+- Internet access for first-time setup and converter downloads
 
-1. Return to **EUV Music Library Tool** and select **Refresh**. MP3s copied through **Open Music Folder** should appear in the song list, including MP3s inside album folders.
-2. Review the **Title**, **Artist**, and **Playback** columns. Correct any missing tags directly in the list. Leave **Both** for war and peace, or choose **War** or **Peace** for a single playlist.
-3. Select **Convert and Implement** in the older interface or **Install Music** in the current interface. Both buttons build the local EU5 music mod. Keep the tool open until the success message appears. For an FFmpeg prompt, follow the setup instructions below.
-4. Open **Europa Universalis V** through Steam. In **Mods**, enable **EUV Music Library**, then restart the game. Open the in-game **Music Player** and look for a title from the song list. Select the title to check playback directly; hearing a song through a war or peace playlist can take longer.
+## Installation
 
-### Starting with an empty library
+1. Download the repository from **Code → Download ZIP** and extract the archive.
+2. Launch **EUV Music Library Tool.cmd** from the extracted folder.
 
-1. On GitHub, select **Code > Download ZIP**. In Downloads, right-click the ZIP, select **Extract All**, then **Extract**. Open the extracted folder and double-click **EUV Music Library Tool.cmd**.
-2. Select **Add MP3 Files**, choose the songs, and select **Open**. The tool copies the MP3s into the library and fills in the song list. For a full album folder, select **Open Music Folder**, copy the album folder into the open window, then select **Refresh**.
-3. Review the list and continue from step 2 under **Songs already in the music folder**. Steam supplies the installed game location, including libraries on additional drives.
+The tool detects the game installation through Steam, including libraries on additional drives. If FFmpeg is missing during the first conversion, accept the installation prompt, wait for setup to finish, then reopen the tool and select **Install Music**.
 
-### First conversion and FFmpeg
+## Usage
 
-FFmpeg converts MP3 audio into a format the game can use. In the current tool, select **Yes** at the FFmpeg setup prompt and let installation finish. Close and reopen **EUV Music Library Tool.cmd**, then select **Install Music** again.
+1. Select **Add MP3 Files** to import tracks. To import album folders, select **Open Music Folder**, copy the folders into the library, then select **Refresh**.
+2. Review the **Title** and **Artist** fields. Set **Playback** to **War**, **Peace**, or **Both**. New tracks default to **Both**.
+3. Select **Install Music** and wait for **Library update complete**.
+4. Open EU5 through Steam, enable **EUV Music Library** in **Mods**, and restart the game. Imported titles are available for selection in the Music Player.
 
-If the older tool displays a command instead, open **Windows Terminal** from Start and run:
-
-```powershell
-winget install --id Gyan.FFmpeg --exact
-```
-
-After installation finishes, reopen the tool, select **Refresh**, then **Convert and Implement**.
-
-## Updating the library or the tool
-
-- **Add or edit songs.** Import more MP3s or copy files through **Open Music Folder** and select **Refresh**. After changing titles, artists, or playback settings, run the install or conversion button again to update the mod.
-- **Remove songs.** Select the library entries and choose **Remove Song**. The selected library copies move to the Recycle Bin. Run **Install Music** in the current tool to update the mod, including after removing the final song.
-- **Upgrade from the older interface.** Close the older tool, extract the current ZIP into a new folder, and launch the new copy. Both interfaces use the same music library under Documents. With the same EU5 user-data location, existing MP3s and saved assignments carry over. Select **Refresh** to check the list.
-- **After a major EU5 update**, run **Install Music** again to rebuild the music banks for the installed game version.
+Select **Install Music** after library edits or a major EU5 update to rebuild the mod. **Remove Song** moves selected library copies to the Recycle Bin. Installing an empty library clears the generated soundtrack.
 
 ## Troubleshooting
 
@@ -53,7 +42,7 @@ After installation finishes, reopen the tool, select **Refresh**, then **Convert
 - Stable track identifiers preserve assignments across metadata edits and same-content renames. Conversion reuses valid media and rebuilds the music banks. Transaction recovery restores the previous output after interrupted or failed conversion.
 - Automated checks cover library management, metadata, generated registrations, and recovery. Native Music Player and dynamic playback still require an in-game test on a supported EU5 installation.
 
-### Command line
+## Command line
 
 For a custom EU5 `--userdir`, pass the matching user-data directory. The launcher also supports unattended sync.
 
@@ -62,7 +51,9 @@ For a custom EU5 `--userdir`, pass the matching user-data directory. The launche
 "EUV Music Library Tool.cmd" -Action Sync
 ```
 
-Run the checks with FFmpeg available on PATH.
+## Tests
+
+Run the PowerShell test suite with FFmpeg available on PATH.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
