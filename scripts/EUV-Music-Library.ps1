@@ -16,6 +16,10 @@ $script:UpstreamSha256 = '2f5d7cafc616668f19414077fba8189916c3e350c96b57a7d3f7b0
 $script:UpstreamUrl = "https://raw.githubusercontent.com/komoreb11/eu5-music-converter/$($script:UpstreamCommit)/EU4_Soundtrack_Setup.ps1"
 $script:SupportedExtensions = @('.mp3')
 $script:ValidMoods = @('both', 'war', 'peace')
+$script:EnableModInstructions = @'
+First install: open EU5 through Steam and select the mod manager icon in the bottom-right corner of the main menu. Tick EUV Music Library, select Save Changes, then Apply. Select Ok on the Playset issues warning (the checksum change affects multiplayer only), then restart EU5.
+Later rebuilds: restart EU5 to load the updated songs.
+'@
 
 if ([string]::IsNullOrWhiteSpace($Eu5UserDir)) {
     $documents = [Environment]::GetFolderPath('MyDocuments')
@@ -36,6 +40,8 @@ $script:BanksDir = Join-Path $script:ModDir 'loading_screen\sound\banks\windows'
 $script:MediaDir = Join-Path $script:BanksDir 'Media'
 $script:TrackDefinitionPath = Join-Path $script:ModDir 'in_game\common\music_player_tracks\euv_music_library.txt'
 $script:LocalizationPath = Join-Path $script:ModDir 'main_menu\localization\music_player_gui\euv_music_library_l_english.yml'
+# Earlier releases wrote localization here; a leftover copy repeats keys with stale titles.
+$script:LegacyLocalizationPath = Join-Path $script:ModDir 'main_menu\localization\english\euv_music_library_l_english.yml'
 $script:CacheDir = Join-Path $env:LOCALAPPDATA 'EUV-Music-Library-Tool'
 $script:UpstreamPath = Join-Path $script:CacheDir "EU4_Soundtrack_Setup-$($script:UpstreamCommit).ps1"
 $script:PatchedPath = Join-Path $script:CacheDir 'EUV-Music-Library-Generated.ps1'
@@ -238,11 +244,31 @@ function Update-ManifestFromFiles {
     $sourceRecords = @()
     foreach ($file in Get-SourceFiles) {
         $relative = $file.FullName.Substring($script:TracksDir.Length).TrimStart('\', '/') -replace '\\', '/'
+        $key = $relative.ToLowerInvariant()
+        $sourceSize = [int64]$file.Length
+        $sourceModified = [string]$file.LastWriteTimeUtc.Ticks
+        # Hashing reads the whole MP3. Reuse the stored hash while the file at the same path
+        # keeps its size and modification time; new, renamed, or changed files are hashed.
+        $sourceSha256 = $null
+        if ($existingByPath.ContainsKey($key)) {
+            $known = $existingByPath[$key]
+            if ($null -ne $known.PSObject.Properties['source_sha256'] -and
+                $null -ne $known.PSObject.Properties['source_size'] -and
+                $null -ne $known.PSObject.Properties['source_modified'] -and
+                [string]$known.source_sha256 -match '^[a-f0-9]{64}$' -and
+                [int64]$known.source_size -eq $sourceSize -and
+                [string]$known.source_modified -eq $sourceModified) {
+                $sourceSha256 = ([string]$known.source_sha256).ToLowerInvariant()
+            }
+        }
+        if ($null -eq $sourceSha256) { $sourceSha256 = Get-FileSha256 $file.FullName }
         $sourceRecords += [PSCustomObject]@{
             File = $file
             Relative = $relative
-            Key = $relative.ToLowerInvariant()
-            SourceSha256 = Get-FileSha256 $file.FullName
+            Key = $key
+            SourceSha256 = $sourceSha256
+            SourceSize = $sourceSize
+            SourceModified = $sourceModified
         }
     }
 
@@ -297,6 +323,8 @@ function Update-ManifestFromFiles {
                 enabled = $enabled
                 mood = $mood
                 source_sha256 = $sourceSha256
+                source_size = $record.SourceSize
+                source_modified = $record.SourceModified
             }
         } else {
             $metadata = Read-Mp3Metadata $file.FullName
@@ -309,6 +337,8 @@ function Update-ManifestFromFiles {
                 enabled = $true
                 mood = 'both'
                 source_sha256 = $sourceSha256
+                source_size = $record.SourceSize
+                source_modified = $record.SourceModified
             }
             $newCount++
         }
@@ -539,6 +569,12 @@ function Find-Ogg([string]$SourceOgg, [string]$DlcDir, [string]$Eu4Path) {
     $patched = $patched.Replace('EU4 not found. Make sure Europa Universalis IV is installed on this Steam account.', 'The local music library folder was not found.')
     $patched = $patched.Replace('EU4: $eu4Path', 'Music library: $eu4Path')
     $patched = $patched.Replace('Not found in EU4 folder', 'Not found in music library')
+    $patched = $patched.Replace('"[EU4 Soundtrack] $msg"', '"[EUV Music Library] $msg"')
+
+    # The upstream script ends by pausing before its launcher starts the game. The wrapper
+    # never launches EU5, so drop the misleading message and the delay on each converter run.
+    $launchPattern = '(?m)^\s*Write-Status "Setup complete\. Game starting\.\.\."\r?\n\s*Start-Sleep -Seconds 2\s*$'
+    $patched = (New-Object Text.RegularExpressions.Regex($launchPattern)).Replace($patched, 'Write-Status "Sound banks updated."', 1)
 
     # Insert user-controlled paths after all upstream text rewrites.
     $trackLines = foreach ($track in $Tracks) {
@@ -652,6 +688,16 @@ function Write-MusicPlayerRegistration([object[]]$Tracks) {
     $utf8Bom = New-Object Text.UTF8Encoding($true)
     [IO.File]::WriteAllText($script:TrackDefinitionPath, $definitions, $utf8Bom)
     [IO.File]::WriteAllText($script:LocalizationPath, $localization, $utf8Bom)
+    Remove-LegacyLocalization
+}
+
+function Remove-LegacyLocalization {
+    if (-not (Test-Path -LiteralPath $script:LegacyLocalizationPath -PathType Leaf)) { return }
+    Remove-Item -LiteralPath $script:LegacyLocalizationPath -Force
+    $folder = Split-Path $script:LegacyLocalizationPath -Parent
+    if (-not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $folder -Force
+    }
 }
 
 function Get-ValidatedWemId([object]$Value) {
@@ -1002,6 +1048,7 @@ function Clear-GeneratedMod {
     foreach ($path in @($script:TrackDefinitionPath, $script:LocalizationPath)) {
         if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
     }
+    Remove-LegacyLocalization
     if (Test-Path -LiteralPath $script:StatePath -PathType Leaf) {
         Remove-Item -LiteralPath $script:StatePath -Force
     }
@@ -1123,7 +1170,7 @@ function Sync-LibraryOutput {
     }
 
     Write-Success "Synced $($tracks.Count) track(s)."
-    Write-Host 'Enable EUV Music Library in EU5 Mods, then restart the game.' -ForegroundColor White
+    Write-Host $script:EnableModInstructions -ForegroundColor White
     return $true
 }
 
@@ -1274,6 +1321,15 @@ function Show-MusicLibraryContents {
     $pollTimer = New-Object Windows.Forms.Timer
     $pollTimer.Interval = 250
 
+    $setBusy = {
+        param([bool]$Busy)
+        foreach ($control in @($grid, $addButton, $implementButton, $openButton, $refreshButton, $removeButton)) {
+            $control.Enabled = -not $Busy
+        }
+        $progress.Style = if ($Busy) { 'Marquee' } else { 'Blocks' }
+        $form.UseWaitCursor = $Busy
+    }
+
     $loadGrid = {
         $manifest = Update-ManifestFromFiles
         $grid.Rows.Clear()
@@ -1371,14 +1427,7 @@ function Show-MusicLibraryContents {
                 if ($answer -eq 'Yes') { Start-Process -FilePath $installer.Source -ArgumentList 'install --id Gyan.FFmpeg --exact --source winget' }
                 return
             }
-            $form.UseWaitCursor = $true
-            $grid.Enabled = $false
-            $addButton.Enabled = $false
-            $implementButton.Enabled = $false
-            $openButton.Enabled = $false
-            $refreshButton.Enabled = $false
-            $removeButton.Enabled = $false
-            $progress.Style = 'Marquee'
+            & $setBusy $true
             $statusLabel.Text = 'Converting and rebuilding the EU5 local mod...'
             [Windows.Forms.Application]::DoEvents()
             $form.Tag = Start-Job -ScriptBlock {
@@ -1392,14 +1441,7 @@ function Show-MusicLibraryContents {
         } catch {
             $statusLabel.Text = 'Music installation stopped.'
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, $script:ToolName, 'OK', 'Error') | Out-Null
-            $progress.Style = 'Blocks'
-            $grid.Enabled = $true
-            $addButton.Enabled = $true
-            $implementButton.Enabled = $true
-            $openButton.Enabled = $true
-            $refreshButton.Enabled = $true
-            $removeButton.Enabled = $true
-            $form.UseWaitCursor = $false
+            & $setBusy $false
         }
     })
 
@@ -1412,20 +1454,13 @@ function Show-MusicLibraryContents {
         $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
         Remove-Job -Job $job -Force
         $form.Tag = $null
-        $grid.Enabled = $true
-        $addButton.Enabled = $true
-        $progress.Style = 'Blocks'
-        $implementButton.Enabled = $true
-        $openButton.Enabled = $true
-        $refreshButton.Enabled = $true
-        $removeButton.Enabled = $true
-        $form.UseWaitCursor = $false
+        & $setBusy $false
 
         if ($jobState -eq 'Completed') {
             & $loadGrid
             $statusLabel.Text = 'Music library updated.'
             [Windows.Forms.MessageBox]::Show(
-                'Library update complete. Open Europa Universalis V through Steam. In Mods, enable EUV Music Library and restart the game.',
+                "Library update complete.`r`n`r`n$($script:EnableModInstructions)",
                 $script:ToolName, 'OK', 'Information') | Out-Null
         } else {
             $message = if ($null -ne $reason -and -not [string]::IsNullOrWhiteSpace($reason.Message)) {

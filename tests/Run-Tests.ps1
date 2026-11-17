@@ -117,6 +117,18 @@ try {
     Remove-Item -LiteralPath $duplicate -Force
     $manifest = Update-ManifestFromFiles
 
+    $realHash = Get-FileSha256 $fixture
+    Assert-True ($manifest.tracks[0].source_sha256 -eq $realHash) 'manifest should store the source hash'
+    Assert-True ([int64]$manifest.tracks[0].source_size -eq (Get-Item -LiteralPath $fixture).Length) 'manifest should store the source size'
+    $manifest.tracks[0].source_sha256 = 'f' * 64
+    Save-Manifest $manifest
+    $manifest = Update-ManifestFromFiles
+    Assert-True ($manifest.tracks[0].source_sha256 -eq ('f' * 64)) 'unchanged files should reuse the stored hash without rereading audio'
+    (Get-Item -LiteralPath $fixture).LastWriteTimeUtc = (Get-Item -LiteralPath $fixture).LastWriteTimeUtc.AddMinutes(1)
+    $manifest = Update-ManifestFromFiles
+    Assert-True ($manifest.tracks[0].source_sha256 -eq $realHash) 'a changed modification time should force rehashing'
+    Assert-True ($manifest.tracks[0].id -eq $trackId) 'rehashing should preserve the track ID'
+
     $renamed = Join-Path $script:TracksDir 'renamed.mp3'
     Move-Item -LiteralPath $fixture -Destination $renamed
     $manifest.tracks[0].mood = 'war'
@@ -166,7 +178,11 @@ try {
     Assert-True ([BitConverter]::ToUInt32($oddLabeled, 4) -eq $oddLabeled.Length - 8) 'RIFF length should include padding'
 
     Write-SoundbanksInfo $active
+    Ensure-Directory (Split-Path $script:LegacyLocalizationPath -Parent)
+    [IO.File]::WriteAllText($script:LegacyLocalizationPath, "l_english:`r`n stale: `"Old`"`r`n")
     Write-MusicPlayerRegistration $active
+    Assert-True (-not (Test-Path -LiteralPath $script:LegacyLocalizationPath)) 'registration should remove localization left by earlier releases'
+    Assert-True (-not (Test-Path -LiteralPath (Split-Path $script:LegacyLocalizationPath -Parent))) 'an emptied legacy localization folder should be removed'
     $soundbanks = Get-Content -LiteralPath (Join-Path $script:BanksDir 'SoundbanksInfo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $events = @($soundbanks.SoundBanksInfo.SoundBanks[0].Events)
     Assert-True ($events.Count -eq 1) 'SoundbanksInfo should contain one native-player event'
@@ -253,6 +269,10 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $wemPath)) 'empty-library cleanup should remove generated media'
     Assert-True (-not (Test-Path -LiteralPath $script:TrackDefinitionPath)) 'empty-library cleanup should remove player registration'
     Assert-True (-not (Test-Path -LiteralPath $script:LocalizationPath)) 'empty-library cleanup should remove localization'
+    Ensure-Directory (Split-Path $script:LegacyLocalizationPath -Parent)
+    [IO.File]::WriteAllText($script:LegacyLocalizationPath, "l_english:`r`n")
+    Clear-GeneratedMod
+    Assert-True (-not (Test-Path -LiteralPath $script:LegacyLocalizationPath)) 'empty-library cleanup should remove legacy localization'
 
     if ($ConverterSource) {
         $script:UpstreamPath = Join-Path $testRoot 'upstream.ps1'
@@ -269,6 +289,9 @@ try {
         Assert-True (-not $generated.Contains('$r = cmd /c')) 'audio paths should bypass cmd expansion'
         Assert-True (-not $generated.Contains('$env:TEMP\eu4wem_cache')) 'patched helpers should use a private cache'
         Assert-True ($generated.Contains('EUV-Music-Library-Tool\converter-v2')) 'private cache version should be embedded'
+        Assert-True (-not $generated.Contains('Game starting')) 'the converter should not announce a game launch'
+        Assert-True (-not ($generated -match '(?m)^\s*Start-Sleep -Seconds 2\s*$')) 'the converter should not pause before exiting'
+        Assert-True ($generated.Contains('"[EUV Music Library] $msg"')) 'converter status lines should carry the tool name'
         $record = "$($probeTrack.EventName)|$($probeTrack.File)||$($probeTrack.Mood)|$($probeTrack.Culture)"
         Assert-True ($generated.Contains((ConvertTo-PowerShellLiteral $record))) 'upstream replacements should preserve literal track paths'
         Assert-True ($generated.Contains((ConvertTo-PowerShellLiteral $probeBank))) 'upstream replacements should preserve the game path'
