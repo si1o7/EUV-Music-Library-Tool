@@ -6,7 +6,7 @@ A Windows utility for importing MP3 files into Europa Universalis V as a local m
 
 The converter supports EU5 sound-bank versions **150** and **172**, associated with game versions 1.3 and 1.4. The tool checks the installed bank before conversion and stops on an unsupported version. Competing music mods replacing the same music bank must be disabled.
 
-Windows PowerShell 5.1 checks cover metadata, imports, generated registrations, recovery, filename handling, and converter adaptation. Native Music Player and dynamic playlist playback still require an end-to-end in-game test. Compatibility with multiplayer and achievements is unverified.
+Windows PowerShell 5.1 checks cover metadata, imports, generated registrations, recovery, filename handling, and converter adaptation. Music Player playback of imported tracks is verified in game on EU5 1.4.7. Dynamic war and peace playlist playback is not separately verified. Compatibility with multiplayer and achievements is unverified.
 
 ## Requirements
 
@@ -103,7 +103,7 @@ The test suite also accepts `-ConverterSource <path>` for a locally downloaded c
 
 ### AI development disclosure
 
-This project was developed with assistance from OpenAI Codex for software implementation, debugging, and technical research. Project requirements, direction, and maintenance are managed by the repository owner.
+This project was developed with assistance from OpenAI Codex and Anthropic Claude Code for software implementation, debugging, and technical research. Project requirements, direction, and maintenance are managed by the repository owner.
 
 ### Independence and attribution
 
